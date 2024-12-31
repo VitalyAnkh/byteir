@@ -16,7 +16,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "torch-frontend/Transforms/RewriteCustomOp.h"
-#include "PassDetail.h"
+#include "./PassDetail.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Builders.h"
@@ -54,7 +54,7 @@ struct RewriteDynamicPartitionPattern
     }
     SmallVector<Type, 4> resultTypes;
     resultTypes.reserve(numPartitions);
-    auto listType = op->getResult(0).getType().cast<Torch::ListType>();
+    auto listType = cast<Torch::ListType>(op->getResult(0).getType());
     for (int64_t i = 0; i < numPartitions; i++)
       resultTypes.push_back(listType.getContainedType());
 

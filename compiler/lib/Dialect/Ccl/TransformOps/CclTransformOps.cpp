@@ -23,7 +23,7 @@
 #include "mlir/Dialect/PDL/IR/PDL.h"
 #include "mlir/Dialect/PDL/IR/PDLTypes.h"
 #include "mlir/Dialect/Transform/IR/TransformDialect.h"
-#include "mlir/Dialect/Transform/IR/TransformInterfaces.h"
+#include "mlir/Dialect/Transform/Interfaces/TransformInterfaces.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/Support/Debug.h"
 
@@ -50,6 +50,11 @@ transform::DecomposeAllReduceOp::apply(TransformRewriter &rewriter,
           << "target is expected to be of type ccl.all_reduce.";
       return diag;
     }
+    if (!allReduceOp.getSynchronous()) {
+      DiagnosedSilenceableFailure diag =
+          emitSilenceableError() << "ccl.all_reduce should be synchronous.";
+      return diag;
+    }
 
     std::optional<SmallVector<ReplicaGroupsIndices, 4>> replicaGroupsIndices =
         allReduceOp.getReplicaGroupsIndices();
@@ -61,7 +66,7 @@ transform::DecomposeAllReduceOp::apply(TransformRewriter &rewriter,
 
     int64_t axis = static_cast<int64_t>(getAxis());
     Value oldResult = allReduceOp.getResult();
-    ShapedType oldResultType = oldResult.getType().cast<ShapedType>();
+    ShapedType oldResultType = cast<ShapedType>(oldResult.getType());
     if (!oldResultType.hasRank()) {
       DiagnosedSilenceableFailure diag =
           emitSilenceableError()
@@ -95,18 +100,20 @@ transform::DecomposeAllReduceOp::apply(TransformRewriter &rewriter,
         reduceScatterResultShape[axis] = oldShape[axis] / replicaSize;
     }
     TensorType reduceScatterResultType =
-        oldResult.getType().cast<RankedTensorType>().clone(
-            reduceScatterResultShape);
+        cast<RankedTensorType>(oldResult.getType())
+            .clone(reduceScatterResultShape);
 
     OpBuilder builder(target);
     ccl::ReduceScatterOp reduceScatterOp = builder.create<ccl::ReduceScatterOp>(
         target->getLoc(), reduceScatterResultType, allReduceOp.getSrc(),
-        /*dynamic_replica_groups*/ nullptr, allReduceOp.getReductionAttr(),
-        getAxisAttr(), allReduceOp.getReplicaGroupsAttr(),
-        allReduceOp.getUniqueIdAttr());
+        /*dynamic_replica_groups*/ nullptr,
+        /*synchronous*/ allReduceOp.getSynchronousAttr(),
+        allReduceOp.getReductionAttr(), getAxisAttr(),
+        allReduceOp.getReplicaGroupsAttr(), allReduceOp.getUniqueIdAttr());
     ccl::AllGatherOp allGatherOp = builder.create<ccl::AllGatherOp>(
         target->getLoc(), oldResultType, reduceScatterOp.getResult(),
-        /*dynamic_replica_groups*/ nullptr, getAxisAttr(),
+        /*dynamic_replica_groups*/ nullptr,
+        /*synchronous*/ allReduceOp.getSynchronousAttr(), getAxisAttr(),
         allReduceOp.getReplicaGroupsAttr(), allReduceOp.getUniqueIdAttr());
     oldResult.replaceAllUsesWith(allGatherOp.getResult());
     target->erase();
@@ -114,8 +121,8 @@ transform::DecomposeAllReduceOp::apply(TransformRewriter &rewriter,
     allGathers.push_back(allGatherOp);
   }
 
-  transformResults.set(getReduceScatter().cast<OpResult>(), reduceScatters);
-  transformResults.set(getAllGather().cast<OpResult>(), allGathers);
+  transformResults.set(cast<OpResult>(getReduceScatter()), reduceScatters);
+  transformResults.set(cast<OpResult>(getAllGather()), allGathers);
   return DiagnosedSilenceableFailure::success();
 }
 

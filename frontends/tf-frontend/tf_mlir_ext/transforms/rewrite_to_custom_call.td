@@ -23,8 +23,10 @@ include "mhlo/IR/hlo_ops.td"
 
 def OneSize : Constraint<CPred<"$0.size() == 1">, "one size">;
 def TrueBoolAttr : Constraint<CPred<"$0.getValue() == true">, "this BoolAttr should be true">;
+def FalseBoolAttr : Constraint<CPred<"$0.getValue() == false">, "this BoolAttr should be false">;
 def SameTwoValuesOrAttrs : Constraint<CPred<"$0 == $1">, "two values or attrs are the same">;
 def OneRank : Constraint<CPred<"$0.getType().cast<ShapedType>().getRank() == 1">, "ElementsAttr type' rank should be 1">;
+def MultiDim : Constraint<CPred<"$0.getType().cast<ShapedType>().getRank() >= 3">, "rank >= 3">;
 
 //===----------------------------------------------------------------------===//
 // LayerNorm Pattern
@@ -68,6 +70,41 @@ def RewriteLayerNorm : Pat<
    (SameTwoValuesOrAttrs $mean_input, $mean_input_1),
    (OneRank $gama_attr), (OneRank $beta_attr)]>;
 
+def RewriteLayerNormWithoutGamma : Pat<
+  (TF_AddV2Op
+    (TF_MulOp
+      (TF_RsqrtOp
+        (TF_AddV2Op
+          (TF_MeanOp
+            (TF_SquaredDifferenceOp
+              (TF_MeanOp:$mean_input
+                $input,
+                (TF_ConstOp:$axis $axis_attr),
+                $keep_dims_0
+              ),
+              $input
+            ),
+            $axis_1,
+            $keep_dims_1
+          ),
+          (TF_ConstOp $epsilon_attr)
+        )
+      ),
+      (TF_SubOp
+        $input_1,
+        $mean_input_1
+      )
+    ),
+    (TF_ConstOp:$beta $beta_attr)
+  ),
+  (NativeCodeCall<"createLayerNormWithoutGamma($_builder, $_loc, $0, $1, $2, $3)"> $input, $beta, $epsilon_attr, $axis_attr),
+  [(OneSize $epsilon_attr), (OneSize $axis_attr),
+   (TrueBoolAttr $keep_dims_0), (TrueBoolAttr $keep_dims_1),
+   (SameTwoValuesOrAttrs $axis, $axis_1),
+   (SameTwoValuesOrAttrs $input, $input_1),
+   (SameTwoValuesOrAttrs $mean_input, $mean_input_1),
+   (OneRank $beta_attr)]>;
+
 def RewriteLayerNormWithoutBeta : Pat<
   (TF_SubOp
     (TF_MulOp
@@ -102,6 +139,82 @@ def RewriteLayerNormWithoutBeta : Pat<
    (SameTwoValuesOrAttrs $mul_after_rsqrt, $mul_after_rsqrt_1),
    (SameTwoValuesOrAttrs $mean_input, $mean_input_1),
    (OneRank $gama_attr)]>;
+
+def RewriteLayerNormMultiDim : Pat<
+  (TF_AddV2Op
+    (TF_MulOp
+      (TF_MulOp:$mul_after_rsqrt
+        (TF_RsqrtOp
+          (TF_AddV2Op
+            (TF_MeanOp
+              (TF_SquaredDifferenceOp
+                (TF_MeanOp:$mean_input
+                  $input,
+                  (TF_ConstOp:$axis $axis_attr),
+                  $keep_dims_0
+                ),
+                $input
+              ),
+              $axis_1,
+              $keep_dims_1
+            ),
+            (TF_ConstOp $epsilon_attr)
+          )
+        ),
+        (TF_ConstOp:$gama $gama_attr)
+      ),
+      $input
+    ),
+    (TF_SubOp
+      (TF_ConstOp:$beta $beta_attr),
+      (TF_MulOp $mul_after_rsqrt_1, $mean_input_1)
+    )
+  ),
+  (NativeCodeCall<"createLayerNormMultiDim($_builder, $_loc, $0, $1, $2, $3, $4)"> $input, $gama, $beta, $epsilon_attr, $axis_attr),
+  [(OneSize $epsilon_attr), (OneSize $axis_attr),
+   (TrueBoolAttr $keep_dims_0), (TrueBoolAttr $keep_dims_1),
+   (SameTwoValuesOrAttrs $axis, $axis_1),
+   (SameTwoValuesOrAttrs $mul_after_rsqrt, $mul_after_rsqrt_1),
+   (SameTwoValuesOrAttrs $mean_input, $mean_input_1),
+   (MultiDim $input), (MultiDim $gama_attr), (MultiDim $beta_attr)]>;
+
+def RewriteLayerNormMultiDimV2 : Pat<
+  (TF_AddV2Op
+    (TF_MulOp
+      $input,
+      (TF_MulOp:$mul_after_rsqrt
+        (TF_RsqrtOp
+          (TF_AddV2Op
+            (TF_MeanOp
+              (TF_SquaredDifferenceOp
+                $input,
+                (TF_MeanOp:$mean_input
+                  $input,
+                  (TF_ConstOp:$axis $axis_attr),
+                  $keep_dims_0
+                )
+              ),
+              $axis_1,
+              $keep_dims_1
+            ),
+            (TF_ConstOp $epsilon_attr)
+          )
+        ),
+        (TF_ConstOp:$gama $gama_attr)
+      )
+    ),
+    (TF_SubOp
+      (TF_ConstOp:$beta $beta_attr),
+      (TF_MulOp $mul_after_rsqrt_1, $mean_input_1)
+    )
+  ),
+  (NativeCodeCall<"createLayerNormMultiDim($_builder, $_loc, $0, $1, $2, $3, $4)"> $input, $gama, $beta, $epsilon_attr, $axis_attr),
+  [(OneSize $epsilon_attr), (OneSize $axis_attr),
+   (TrueBoolAttr $keep_dims_0), (TrueBoolAttr $keep_dims_1),
+   (SameTwoValuesOrAttrs $axis, $axis_1),
+   (SameTwoValuesOrAttrs $mul_after_rsqrt, $mul_after_rsqrt_1),
+   (SameTwoValuesOrAttrs $mean_input, $mean_input_1),
+   (MultiDim $input), (MultiDim $gama_attr), (MultiDim $beta_attr)]>;
 
 def RewriteLayerNormWithBody : Pat<
   (TF_AddV2Op:$add_outer
@@ -566,6 +679,29 @@ def RewriteL2NormV1 : Pat<
   (NativeCodeCall<"createL2NormV1($_builder, $_loc, $0, $1, $2)"> $input, $epsilon_attr, $axis_attr),
   [(OneSize $epsilon_attr), (OneSize $axis_attr),
    (TrueBoolAttr $keep_dims)]>;
+
+def RewriteL2NormV1Multiplyer : Pat<
+  (TF_MulOp
+    $input,
+    (TF_MulOp
+      (TF_RsqrtOp
+        (TF_MaximumOp
+          (TF_SumOp
+            (TF_SquareOp
+              $input
+            ),
+            (TF_ConstOp:$axis $axis_attr),
+            $keep_dims
+          ),
+          (TF_ConstOp $epsilon_attr)
+        )
+      ),
+      (TF_ConstOp:$mulitplyer $mulitplyer_attr)
+    )
+  ),
+  (NativeCodeCall<"createL2NormV1Multiplyer($_builder, $_loc, $0, $1, $2, $3)"> $input, $mulitplyer, $epsilon_attr, $axis_attr),
+  [(OneSize $epsilon_attr), (OneSize $axis_attr),
+   (TrueBoolAttr $keep_dims)]>;
   
 def RewriteL2NormV1SwapMul : Pat<
   (TF_MulOp
@@ -637,6 +773,52 @@ def RewriteL2NormV3 : Pat<
   ),
   (NativeCodeCall<"createL2NormV2($_builder, $_loc, $0, $1)"> $input, $axis_attr),
   [(OneSize $axis_attr), (TrueBoolAttr $keep_dims)]>;
+
+// matmul(a, b) / (delta(a) * delta(b)) == matmul(a/delta(a), b/delta(b))
+def RewriteCoupleL2NormWithBatchMatMulV2 : Pat<
+  (TF_RealDivOp
+    (TF_BatchMatMulV2Op
+      $inputa_1,
+      $inputb_1,
+      $adj_x_1,
+      $adj_y_1,
+      $grad_x_1,
+      $grad_y_1
+    ),
+    (TF_AddV2Op
+      (TF_BatchMatMulV2Op
+        (TF_SqrtOp
+          (TF_SumOp
+            (TF_SquareOp $inputx),
+            (TF_ConstOp:$axisx $axis_attrx),
+            $keep_dimsa
+          )
+        ),
+        (TF_SqrtOp
+          (TF_SumOp
+            (TF_SquareOp $inputy),
+            (TF_ConstOp:$axisy $axis_attry),
+            $keep_dimsb
+          )
+        ),
+        $adj_x,
+        $adj_y,
+        $grad_x,
+        $grad_y
+      ),
+      (TF_ConstOp $epsilon_attr)
+    )
+  ),
+  (NativeCodeCall<"createCoupleL2NormWithBatchMatMulV2($_builder, $_loc, $0, $1, $2, $3)"> $inputx, $inputy, $epsilon_attr, $axis_attrx),
+  [(OneSize $axis_attrx), (OneSize $axis_attry),
+   (TrueBoolAttr $keep_dimsa), (TrueBoolAttr $keep_dimsb),
+   (FalseBoolAttr $adj_x), (TrueBoolAttr $adj_y),
+   (FalseBoolAttr $grad_x), (FalseBoolAttr $grad_y),
+   (FalseBoolAttr $adj_x_1), (TrueBoolAttr $adj_y_1),
+   (FalseBoolAttr $grad_x_1), (FalseBoolAttr $grad_y_1),
+   (SameTwoValuesOrAttrs $axisx, $axisy),
+   (SameTwoValuesOrAttrs $inputx, $inputa_1),
+   (SameTwoValuesOrAttrs $inputy, $inputb_1)]>;
 
 //===----------------------------------------------------------------------===//
 // GeLU Pattern
@@ -772,6 +954,35 @@ def RewriteGELUtanhV3 : Pat<
   ),
   (NativeCodeCall<"createGELU($_builder, $_loc, $0, \"tanh\")"> $input),
   [(GeluValue0 $cst0), (GeluValue1 $cst1), (GeluValue2 $cst2), (GeluValue4 $cst3), (GeluValue3 $cst4)]>;
+
+
+def RewriteGELUtanhV4 : Pat<
+  (TF_MulOp
+    (TF_AddV2Op
+      (TF_TanhOp
+        (TF_MulOp
+          (TF_AddV2Op
+            $input,
+            (TF_MulOp
+              (TF_PowOp
+                $input,
+                (TF_ConstOp $cst0)
+              ),
+              (TF_ConstOp $cst)
+            )
+          ),
+          (TF_ConstOp $cst3)
+        )
+      ),
+      (TF_ConstOp $cst1)
+    ),
+    (TF_MulOp
+      $input,
+      (TF_ConstOp $cst2)
+    )
+  ),
+  (NativeCodeCall<"createGELU($_builder, $_loc, $0, \"tanh\")"> $input),
+  [(GeluValue4 $cst), (GeluValue3 $cst0), (GeluValue1 $cst1), (GeluValue0 $cst2), (GeluValue2 $cst3)]>;
 
 
 #endif // REWRITE_TO_CUSTOM_CALL_PATTERN

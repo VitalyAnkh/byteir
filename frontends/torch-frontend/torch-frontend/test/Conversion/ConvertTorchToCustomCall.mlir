@@ -1,4 +1,31 @@
-// RUN: torch-frontend-opt %s -convert-torch-to-custom-call --canonicalize-ext | FileCheck %s
+// RUN: torch-frontend-opt %s -convert-torch-to-custom-call="valid-custom-call-ops=byteir.layer_norm,byteir.l2_norm,byteir.softmax,byteir.log_softmax,byteir.gelu,byteir.arg_max,byteir.arg_min,byteir.one_hot,byteir.topk,byteir.non_zero,byteir.resize" --canonicalize-ext | FileCheck %s
+// RUN: torch-frontend-opt %s -convert-torch-to-custom-call --canonicalize-ext | FileCheck %s --check-prefix NONE
+// RUN: torch-frontend-opt %s -convert-torch-to-custom-call="valid-custom-call-ops=math.asin" --canonicalize-ext | FileCheck %s --check-prefix MATH
+
+func.func @torch.aten.asin(%arg0: !torch.vtensor<[?,?],f32>) -> !torch.vtensor<[?,?],f32> {
+  %0 = torch.aten.asin %arg0 : !torch.vtensor<[?,?],f32> -> !torch.vtensor<[?,?],f32>
+  return %0 : !torch.vtensor<[?,?],f32>
+}
+// MATH-LABEL: func.func @torch.aten.asin
+// MATH: stablehlo.custom_call
+// MATH-SAME: @math.asin
+// MATH: byteir_attrs = {}
+// MATH-NOT: torch.aten.asin
+
+func.func @torch.aten.gelu(%arg0: !torch.vtensor<[?,?],f32>) -> !torch.vtensor<[?,?],f32> {
+  %str = torch.constant.str "tanh"
+  %0 = torch.aten.gelu %arg0, %str : !torch.vtensor<[?,?],f32>, !torch.str -> !torch.vtensor<[?,?],f32>
+  return %0 : !torch.vtensor<[?,?],f32>
+}
+// CHECK-LABEL: func.func @torch.aten.gelu
+// CHECK: stablehlo.custom_call
+// CHECK-SAME: @byteir.gelu
+// CHECK: byteir_attrs = {approximate = "tanh"}
+// CHECK-NOT: torch.aten.gelu
+
+// NONE-LABEL: func.func @torch.aten.gelu
+// NONE-NOT: stablehlo.custom_call
+// NONE: torch.aten.gelu
 
 func.func @torch.aten.native_layer_norm(%arg0: !torch.vtensor<[3,7,4,5],f32>) -> !torch.vtensor<[3,7,4,5],f32> {
   %0 = torch.vtensor.literal(dense<0.000000e+00> : tensor<4x5xf32>) : !torch.vtensor<[4,5],f32>
@@ -86,18 +113,6 @@ func.func @torch.aten._log_softmax(%arg0: !torch.vtensor<[?,?,?],f32>) -> !torch
 // CHECK: byteir_attrs = {axis = 0 : i64}
 // CHECK-NOT: torch.aten._log_softmaxcd
 
-func.func @torch.aten.argmax(%arg0: !torch.vtensor<[?,?,?],f32>) -> !torch.vtensor<[?,?],si64> {
-  %int0 = torch.constant.int 0
-  %false = torch.constant.bool false
-  %0 = torch.aten.argmax %arg0, %int0, %false : !torch.vtensor<[?,?,?],f32>, !torch.int, !torch.bool -> !torch.vtensor<[?,?],si64>
-  return %0 : !torch.vtensor<[?,?],si64>
-}
-// CHECK-LABEL: func.func @torch.aten.argmax
-// CHECK: stablehlo.custom_call
-// CHECK-SAME: @byteir.arg_max
-// CHECK: byteir_attrs = {axis = 0 : i64, keep_dims = false, select_last_index = false}
-// CHECK-NOT: torch.aten.argmax
-
 func.func @torch.aten.max.dim(%arg0: !torch.vtensor<[32,64,21128],f32>) -> !torch.vtensor<[32,64],f32> {
   %int-1 = torch.constant.int -1
   %false = torch.constant.bool false
@@ -105,9 +120,7 @@ func.func @torch.aten.max.dim(%arg0: !torch.vtensor<[32,64,21128],f32>) -> !torc
   return %values : !torch.vtensor<[32,64],f32>
 }
 // CHECK-LABEL: func.func @torch.aten.max.dim
-// CHECK: stablehlo.reduce
-// CHECK: stablehlo.max
-// CHECK-NOT: torch.aten.max.dim
+// CHECK: torch.aten.max.dim
 
 func.func @torch.aten.max.dim.1(%arg0: !torch.vtensor<[32,64,21128],f32>) -> (!torch.vtensor<[32,64],f32>, !torch.vtensor<[32,64],si64>) {
   %int-1 = torch.constant.int -1
@@ -175,31 +188,17 @@ func.func @torch.custom.dynamic_mask_stitch(%arg0: !torch.vtensor<[?,?],f32>, %a
 // CHECK: byteir_attrs = {}
 // CHECH-NOT: torch.custom_op
 
-func.func @torch.aten.nll_loss_forward(%arg0: !torch.vtensor<[8192,50257],f32>, %arg1: !torch.vtensor<[8192],si64>) -> (!torch.vtensor<[],f32>, !torch.vtensor<[],f32>) {
-  %int1 = torch.constant.int 1
-  %int-1 = torch.constant.int -1
-  %none = torch.constant.none
-  %output, %total_weight = torch.aten.nll_loss_forward %arg0, %arg1, %none, %int1, %int-1 : !torch.vtensor<[8192,50257],f32>, !torch.vtensor<[8192],si64>, !torch.none, !torch.int, !torch.int -> !torch.vtensor<[],f32>, !torch.vtensor<[],f32>
-  return %output, %total_weight : !torch.vtensor<[],f32>, !torch.vtensor<[],f32>
+func.func @torch.byteir.l2_norm(%arg0: !torch.vtensor<[3,4],f32>) -> !torch.vtensor<[3,4],f32> {
+  %float9.999990e-13 = torch.constant.float 9.9999999999999998E-13
+  %int1 = torch.constant.int -1
+  %0 = torch.prim.ListConstruct %int1 : (!torch.int) -> !torch.list<int>
+  %4 = torch.operator "byteir.l2_norm"(%arg0, %0, %float9.999990e-13) {eps_outside_sqrt = true} : (!torch.vtensor<[3,4],f32>, !torch.list<int>, !torch.float) -> !torch.vtensor<[3,4],f32>
+  return %4 : !torch.vtensor<[3,4],f32>
 }
-// CHECK-LABEL: func.func @torch.aten.nll_loss_forward
-// CHECK: stablehlo.custom_call
-// CHECK-SAME: @byteir.nll_loss_forward
-// CHECK: byteir_attrs = {ignore_index = -1 : i64, reduction = 1 : i64}
-// CHECH-NOT: torch.aten.nll_loss_forward
-
-func.func @torch.aten.nll_loss_backward(%arg0: !torch.vtensor<[],f32>, %arg1: !torch.vtensor<[8192,50257],f32>, %arg2: !torch.vtensor<[8192],si64>, %arg3: !torch.vtensor<[],f32>) -> (!torch.vtensor<[8192,50257],f32>) {
-  %int1 = torch.constant.int 1
-  %int-1 = torch.constant.int -1
-  %none = torch.constant.none
-  %0 = torch.aten.nll_loss_backward %arg0, %arg1, %arg2, %none, %int1, %int-1, %arg3 : !torch.vtensor<[],f32>, !torch.vtensor<[8192,50257],f32>, !torch.vtensor<[8192],si64>, !torch.none, !torch.int, !torch.int, !torch.vtensor<[],f32> -> !torch.vtensor<[8192,50257],f32>
-  return %0 : !torch.vtensor<[8192,50257],f32>
-}
-// CHECK-LABEL: func.func @torch.aten.nll_loss_backward
-// CHECK: stablehlo.custom_call
-// CHECK-SAME: @byteir.nll_loss_backward
-// CHECK: byteir_attrs = {ignore_index = -1 : i64, reduction = 1 : i64}
-// CHECH-NOT: torch.aten.nll_loss_backward
+// CHECK-LABEL: func.func @torch.byteir.l2_norm
+// CHECK:  stablehlo.custom_call
+// CHECK-SAME: @byteir.l2_norm
+// CHECK: byteir_attrs = {axis = [1], eps_outside_sqrt = true, epsilon = 9.9999999999999998E-13 : f64}
 
 func.func @torch.byteir.flash_attn_fwd(%arg0: !torch.vtensor<[2,12,256,128],f32>, %arg1: !torch.vtensor<[2,12,256,128],f32>, %arg2: !torch.vtensor<[2,12,256,128],f32>) -> (!torch.vtensor<[2,12,256,128],f32>, !torch.vtensor<[2,12,256,128],f32>, !torch.vtensor<[2,12,256,128],f32>, !torch.vtensor<[2,12,256,128],f32>, !torch.vtensor<[2,12,256,128],f32>, !torch.vtensor<[2,256,12],f32>, !torch.vtensor<[2],si64>) {
   %float1.000000e00 = torch.constant.float 1.000000e+00
@@ -226,3 +225,48 @@ func.func @torch.byteir.flash_attn_bwd(%arg0: !torch.vtensor<[2,256,12,128],f16>
 // CHECK-SAME: @byteir.flash_attn_bwd
 // CHECK: byteir_attrs = {causal = true, dropout_p = 1.000000e-01 : f64, softmax_scale = 1.000000e+00 : f64}
 // CHECH-NOT: torch.operator
+
+func.func @torch.aten.nonzero(%arg0: !torch.vtensor<[5],si64>) -> !torch.vtensor<[?,1],si64> {
+  %0 = torch.aten.nonzero %arg0 : !torch.vtensor<[5],si64> -> !torch.vtensor<[?,1],si64>
+  return %0 : !torch.vtensor<[?,1],si64>
+}
+// CHECK-LABEL: func.func @torch.aten.nonzero
+// CHECK: stablehlo.custom_call
+// CHECK-SAME: @byteir.non_zero
+// CHECK: byteir_attrs = {}
+// CHECH-NOT: torch.aten.nonzero
+
+func.func @torch.aten.upsample_nearest2d.vec(%arg0: !torch.vtensor<[1,3,10,20],f32>) -> !torch.vtensor<[1,3,15,40],f32> {
+  %none = torch.constant.none
+  %int15 = torch.constant.int 15
+  %int40 = torch.constant.int 40
+  %output_size = torch.prim.ListConstruct %int15, %int40 : (!torch.int, !torch.int) -> !torch.list<int>
+  %0 = torch.aten.upsample_nearest2d.vec %arg0, %output_size, %none : !torch.vtensor<[1,3,10,20],f32>, !torch.list<int>, !torch.none -> !torch.vtensor<[1,3,15,40],f32>
+  return %0 : !torch.vtensor<[1,3,15,40],f32>
+}
+// CHECK-LABEL: func.func @torch.aten.upsample_nearest2d.vec
+// CHECK: stablehlo.custom_call
+// CHECK-SAME: @byteir.resize
+// CHECK-NOT: torch.aten.upsample_nearest2d.vec
+
+func.func @torch.aten.upsample_nearest2d(%arg0: !torch.vtensor<[1,3,10,20],f32>) -> !torch.vtensor<[1,3,15,40],f32> {
+  %none = torch.constant.none
+  %int15 = torch.constant.int 15
+  %int40 = torch.constant.int 40
+  %output_size = torch.prim.ListConstruct %int15, %int40 : (!torch.int, !torch.int) -> !torch.list<int>
+  %0 = torch.aten.upsample_nearest2d %arg0, %output_size, %none, %none : !torch.vtensor<[1,3,10,20],f32>, !torch.list<int>, !torch.none, !torch.none -> !torch.vtensor<[1,3,15,40],f32>
+  return %0 : !torch.vtensor<[1,3,15,40],f32>
+}
+// CHECK-LABEL: func.func @torch.aten.upsample_nearest2d
+// CHECK: stablehlo.custom_call
+// CHECK-SAME: @byteir.resize
+// CHECK-NOT: torch.aten.upsample_nearest2d
+
+func.func @torch.triton.custom_op(%arg0: !torch.vtensor<[128,256],f32>, %arg1: !torch.vtensor<[128,256],f32>) -> !torch.vtensor<[128,256],f32> {
+  %0 = torch.operator "triton.custom_op"(%arg0, %arg1) : (!torch.vtensor<[128,256],f32>, !torch.vtensor<[128,256],f32>) -> (!torch.vtensor<[128,256],f32>)
+  return %0 : !torch.vtensor<[128,256],f32>
+}
+// CHECK-LABEL: func.func @torch.triton.custom_op
+// CHECK: stablehlo.custom_call
+// CHECK-SAME: @triton.custom_op
+// CHECK-NOT: torch.operator

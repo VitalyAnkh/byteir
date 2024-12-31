@@ -27,6 +27,7 @@
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/Builders.h"
 #include <unordered_set>
+#include <vector>
 
 using namespace brt;
 using namespace brt::ir;
@@ -247,8 +248,7 @@ const void *CreateMatmul(brt::ir::ByREBuilder &byre_builder, DTypeEnum dataType,
                          const std::string &space, int64_t m, int64_t n,
                          int64_t k, int64_t lhs_contracting_dimension /*=1*/,
                          int64_t rhs_contracting_dimension /*=0*/,
-                         bool output_transpose /*=false*/,
-                         bool compute_on_fp16 /*=false*/) {
+                         DTypeEnum computeType /*=DTypeEnum::Invalid*/) {
 
   mlir::ModuleOp module_op = byre_builder.GetModuleOp();
   auto ctx = byre_builder.GetMLIRContext();
@@ -267,10 +267,6 @@ const void *CreateMatmul(brt::ir::ByREBuilder &byre_builder, DTypeEnum dataType,
     BRT_THROW("invalid data type");
   }
 
-  // int64_t m = 128;
-  // int64_t k = 32;
-  // int64_t n = 64;
-
   llvm::SmallVector<int64_t, 4> shape_A =
       lhs_contracting_dimension == 1 ? llvm::SmallVector<int64_t>{m, k}
                                      : llvm::SmallVector<int64_t>{k, m};
@@ -283,9 +279,7 @@ const void *CreateMatmul(brt::ir::ByREBuilder &byre_builder, DTypeEnum dataType,
   auto type_B =
       MemRefType::get(shape_B, type, MemRefLayoutAttrInterface{}, space_attr);
 
-  llvm::SmallVector<int64_t, 4> shape_C =
-      output_transpose ? llvm::SmallVector<int64_t>{n, m}
-                       : llvm::SmallVector<int64_t>{m, n};
+  llvm::SmallVector<int64_t, 4> shape_C = llvm::SmallVector<int64_t>{m, n};
   auto type_C =
       MemRefType::get(shape_C, type, MemRefLayoutAttrInterface{}, space_attr);
 
@@ -308,11 +302,10 @@ const void *CreateMatmul(brt::ir::ByREBuilder &byre_builder, DTypeEnum dataType,
                       op_builder.getI64IntegerAttr(lhs_contracting_dimension));
   compute_op->setAttr("rhs_contracting_dimension",
                       op_builder.getI64IntegerAttr(rhs_contracting_dimension));
-  if (output_transpose) {
-    compute_op->setAttr("output_transpose", op_builder.getUnitAttr());
-  }
-  if (compute_on_fp16) {
-    compute_op->setAttr("compute_on_fp16", op_builder.getUnitAttr());
+  if (computeType != DTypeEnum::Invalid) {
+    compute_op->setAttr(
+        "compute_type",
+        mlir::TypeAttr::get(ConvertDTypeToMLIRType(computeType, ctx)));
   }
 
   //  insert ReturnOp
@@ -387,30 +380,61 @@ const void *CreateMatmul2(brt::ir::ByREBuilder &byre_builder,
 }
 
 const void *CreateBatchMatmul(brt::ir::ByREBuilder &byre_builder,
-                              const std::string &space) {
+                              DTypeEnum dataType, const std::string &space,
+                              llvm::ArrayRef<int64_t> b, int64_t m, int64_t n,
+                              int64_t k, int64_t lhs_contracting_dimension,
+                              int64_t rhs_contracting_dimension,
+                              DTypeEnum computeType /*=DTypeEnum::Invalid*/) {
   mlir::ModuleOp module_op = byre_builder.GetModuleOp();
   auto ctx = byre_builder.GetMLIRContext();
   auto op_builder = OpBuilder(ctx);
 
-  int64_t batch_count0 = 2;
-  int64_t batch_count1 = 17;
-  int64_t m = 128;
-  int64_t k = 32;
-  int64_t n = 64;
-
   auto space_attr = StringAttr::get(ctx, space);
+  std::string op_name = "BatchMatmulOp";
+  mlir::Type type;
+  if (dataType == DTypeEnum::Float32) {
+    op_name = op_name + "_f32f32_f32";
+    type = op_builder.getF32Type();
+  } else if (dataType == DTypeEnum::Float16) {
+    op_name = op_name + "_f16f16_f16";
+    type = op_builder.getF16Type();
+  } else {
+    BRT_THROW("invalid data type");
+  }
 
-  llvm::SmallVector<int64_t, 4> shape_A{batch_count0, batch_count1, m, k};
-  auto type_A = MemRefType::get(shape_A, op_builder.getF32Type(),
-                                MemRefLayoutAttrInterface{}, space_attr);
+  int64_t rank = b.size() + 2;
 
-  llvm::SmallVector<int64_t, 4> shape_B{batch_count0, batch_count1, k, n};
-  auto type_B = MemRefType::get(shape_B, op_builder.getF32Type(),
-                                MemRefLayoutAttrInterface{}, space_attr);
+  llvm::SmallVector<int64_t, 4> shape_A(b);
+  if (lhs_contracting_dimension == rank - 1) {
+    shape_A.push_back(m);
+    shape_A.push_back(k);
+  } else if (lhs_contracting_dimension == rank - 2) {
+    shape_A.push_back(k);
+    shape_A.push_back(m);
+  } else {
+    BRT_THROW("invalid lhs_contracting_dimension");
+  }
+  auto type_A =
+      MemRefType::get(shape_A, type, MemRefLayoutAttrInterface{}, space_attr);
 
-  llvm::SmallVector<int64_t, 4> shape_C{batch_count0, batch_count1, m, n};
-  auto type_C = MemRefType::get(shape_C, op_builder.getF32Type(),
-                                MemRefLayoutAttrInterface{}, space_attr);
+  llvm::SmallVector<int64_t, 4> shape_B(b);
+  if (rhs_contracting_dimension == rank - 2) {
+    shape_B.push_back(k);
+    shape_B.push_back(n);
+  } else if (rhs_contracting_dimension == rank - 1) {
+    shape_B.push_back(n);
+    shape_B.push_back(k);
+  } else {
+    BRT_THROW("invalid rhs_contracting_dimension");
+  }
+  auto type_B =
+      MemRefType::get(shape_B, type, MemRefLayoutAttrInterface{}, space_attr);
+
+  llvm::SmallVector<int64_t, 4> shape_C(b);
+  shape_C.push_back(m);
+  shape_C.push_back(n);
+  auto type_C =
+      MemRefType::get(shape_C, type, MemRefLayoutAttrInterface{}, space_attr);
 
   // create an entry func
   func::FuncOp func_op = byre_builder.CreateEntryPointFuncSignature(
@@ -424,18 +448,25 @@ const void *CreateBatchMatmul(brt::ir::ByREBuilder &byre_builder,
 
   // insert Op
   auto compute_op = op_builder.create<byre::ComputeOp>(
-      UnknownLoc::get(ctx), "BatchMatmulOp_f32f32_f32",
+      UnknownLoc::get(ctx), op_name,
       ValueRange{entry_block->getArgument(0), entry_block->getArgument(1)},
       ValueRange{entry_block->getArgument(2)});
 
   compute_op->setAttr("lhs_batching_dimensions",
-                      op_builder.getI64ArrayAttr({0, 1}));
+                      op_builder.getI64ArrayAttr(
+                          llvm::to_vector(llvm::seq<int64_t>(0, b.size()))));
   compute_op->setAttr("rhs_batching_dimensions",
-                      op_builder.getI64ArrayAttr({0, 1}));
+                      op_builder.getI64ArrayAttr(
+                          llvm::to_vector(llvm::seq<int64_t>(0, b.size()))));
   compute_op->setAttr("lhs_contracting_dimension",
-                      op_builder.getI64IntegerAttr(3));
+                      op_builder.getI64IntegerAttr(lhs_contracting_dimension));
   compute_op->setAttr("rhs_contracting_dimension",
-                      op_builder.getI64IntegerAttr(2));
+                      op_builder.getI64IntegerAttr(rhs_contracting_dimension));
+  if (computeType != DTypeEnum::Invalid) {
+    compute_op->setAttr(
+        "compute_type",
+        mlir::TypeAttr::get(ConvertDTypeToMLIRType(computeType, ctx)));
+  }
 
   //  insert ReturnOp
   op_builder.create<mlir::func::ReturnOp>(UnknownLoc::get(ctx));
@@ -1084,6 +1115,37 @@ const void *CreateAliasThenIndexPut(brt::ir::ByREBuilder &byre_builder,
   return module_op.getAsOpaquePointer();
 }
 
+const void *CreateRepeat(brt::ir::ByREBuilder &byre_builder, DTypeEnum dataType,
+                         DTypeEnum timesType, std::vector<int64_t> data_shape,
+                         std::vector<int64_t> times_shape,
+                         std::vector<int64_t> output_shape) {
+  mlir::ModuleOp m = byre_builder.GetModuleOp();
+  auto ctx = byre_builder.GetMLIRContext();
+  auto op_builder = OpBuilder(ctx);
+
+  auto data_ele_type = ConvertDTypeToMLIRType(dataType, ctx);
+  auto times_ele_type = ConvertDTypeToMLIRType(timesType, ctx);
+  auto data_type = MemRefType::get(data_shape, data_ele_type);
+  auto times_type = MemRefType::get(times_shape, times_ele_type);
+  auto output_type = MemRefType::get(output_shape, data_ele_type);
+
+  // create an entry func
+  func::FuncOp func_op = byre_builder.CreateEntryPointFuncSignature(
+      "test", {{data_type, AT::Input, "A"},
+               {times_type, AT::Input, "B"},
+               {output_type, AT::Output, "C"}});
+
+  // add entry function body
+  mlir::Block *entry_block = func_op.addEntryBlock();
+  op_builder.setInsertionPointToStart(entry_block);
+  op_builder.create<byre::ComputeOp>(
+      UnknownLoc::get(ctx), "byteir.repeat",
+      ValueRange{entry_block->getArgument(0), entry_block->getArgument(1)},
+      ValueRange{entry_block->getArgument(2)});
+  op_builder.create<mlir::func::ReturnOp>(UnknownLoc::get(ctx));
+  return m.getAsOpaquePointer();
+}
+
 const void *CreatePTXAddOp(brt::ir::ByREBuilder &byre_builder) {
 
   mlir::ModuleOp m = byre_builder.GetModuleOp();
@@ -1110,6 +1172,8 @@ const void *CreatePTXAddOp(brt::ir::ByREBuilder &byre_builder) {
       UnknownLoc::get(ctx), "PTXOp",
       ValueRange{entry_block->getArgument(0), entry_block->getArgument(1)},
       ValueRange{entry_block->getArgument(2)});
+  ptx_op->setAttr("device_file_name",
+                  op_builder.getStringAttr("test/test_files/llvm_ptx_add.ptx"));
   ptx_op->setAttr("kernel_name", op_builder.getStringAttr("add_kernel"));
   ptx_op->setAttr("GridSize.x", op_builder.getI32IntegerAttr(4));
   ptx_op->setAttr("BlockSize.x", op_builder.getI32IntegerAttr(256));
@@ -1117,13 +1181,11 @@ const void *CreatePTXAddOp(brt::ir::ByREBuilder &byre_builder) {
 
   //  insert ReturnOp
   op_builder.create<mlir::func::ReturnOp>(UnknownLoc::get(ctx));
-  func_op->setAttr("device_file_name", op_builder.getStringAttr(
-                                           "test/test_files/llvm_ptx_add.ptx"));
 
   return m.getAsOpaquePointer();
 }
 
-const void *CreateTFWhereOp(brt::ir::ByREBuilder &byre_builder,
+const void *CreateNonZeroOp(brt::ir::ByREBuilder &byre_builder,
                             DTypeEnum input_dtype,
                             const std::vector<int64_t> &shape) {
 
@@ -1146,7 +1208,7 @@ const void *CreateTFWhereOp(brt::ir::ByREBuilder &byre_builder,
   // add entry function body
   mlir::Block *entry_block = func_op.addEntryBlock();
   op_builder.setInsertionPointToStart(entry_block);
-  op_builder.create<byre::ComputeOp>(UnknownLoc::get(ctx), "tf.Where",
+  op_builder.create<byre::ComputeOp>(UnknownLoc::get(ctx), "byteir.non_zero",
                                      ValueRange{entry_block->getArgument(0)},
                                      ValueRange{entry_block->getArgument(1)});
   op_builder.create<mlir::func::ReturnOp>(UnknownLoc::get(ctx));
@@ -1211,22 +1273,22 @@ const void *CreateTFStringToNumberOp(brt::ir::ByREBuilder &byre_builder,
       UnknownLoc::get(ctx), "tf.StringToNumber",
       ValueRange{entry_block->getArgument(0)},
       ValueRange{entry_block->getArgument(1)});
-  std::string converted_type_str;
+  Type outTypeType;
   switch (OutType) {
   case DTypeEnum::Int32: {
-    converted_type_str = "i32";
+    outTypeType = op_builder.getI32Type();
     break;
   }
   case DTypeEnum::Int64: {
-    converted_type_str = "i64";
+    outTypeType = op_builder.getI64Type();
     break;
   }
   case DTypeEnum::Float32: {
-    converted_type_str = "f32";
+    outTypeType = op_builder.getF32Type();
     break;
   }
   case DTypeEnum::Float64: {
-    converted_type_str = "f64";
+    outTypeType = op_builder.getF64Type();
     break;
   }
   default: {
@@ -1234,8 +1296,7 @@ const void *CreateTFStringToNumberOp(brt::ir::ByREBuilder &byre_builder,
     break;
   }
   }
-  stringToNumberOp->setAttr("out_type",
-                            op_builder.getStringAttr(converted_type_str));
+  stringToNumberOp->setAttr("out_type", TypeAttr::get(outTypeType));
   op_builder.create<mlir::func::ReturnOp>(UnknownLoc::get(ctx));
   return m.getAsOpaquePointer();
 }

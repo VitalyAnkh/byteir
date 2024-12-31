@@ -15,12 +15,12 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "mhlo/IR/hlo_ops.h"
 #include "mlir/IR/AsmState.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/InitAllDialects.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Support/Timing.h"
+#include "stablehlo/dialect/StablehloOps.h"
 
 #include "third_party/onnx-mlir/src/Compiler/CompilerOptions.hpp"
 #include "third_party/onnx-mlir/src/Compiler/CompilerUtils.hpp"
@@ -37,7 +37,7 @@ int main(int argc, char *argv[]) {
   context.getOrLoadDialect<mlir::func::FuncDialect>();
   context.getOrLoadDialect<mlir::shape::ShapeDialect>();
   context.getOrLoadDialect<mlir::ONNXDialect>();
-  context.getOrLoadDialect<mlir::mhlo::MhloDialect>();
+  context.getOrLoadDialect<mlir::stablehlo::StablehloDialect>();
 
   // Register MLIR command line options.
   mlir::registerAsmPrinterCLOptions();
@@ -53,23 +53,41 @@ int main(int argc, char *argv[]) {
 
   onnx_frontend::EmissionTargetType emissionTarget;
   bool emitElide = false;
+  bool doSerial = false;
   if (onnx_mlir::outputBaseName == "-") {
-    emissionTarget = onnx_frontend::EmitMhloIR;
+    emissionTarget = onnx_frontend::EmitStablehloIR;
   } else if (onnx_frontend::EndsWith(onnx_mlir::outputBaseName, ".onnx.mlir")) {
     emissionTarget = onnx_frontend::EmitONNXIR;
   } else if (onnx_frontend::EndsWith(onnx_mlir::outputBaseName,
                                      ".onnx.elide.mlir")) {
     emissionTarget = onnx_frontend::EmitONNXIR;
     emitElide = true;
-  } else if (onnx_frontend::EndsWith(onnx_mlir::outputBaseName, ".mhlo.mlir")) {
-    emissionTarget = onnx_frontend::EmitMhloIR;
   } else if (onnx_frontend::EndsWith(onnx_mlir::outputBaseName,
-                                     ".mhlo.elide.mlir")) {
-    emissionTarget = onnx_frontend::EmitMhloIR;
+                                     ".stablehlo.mlir")) {
+    emissionTarget = onnx_frontend::EmitStablehloIR;
+  } else if (onnx_frontend::EndsWith(onnx_mlir::outputBaseName,
+                                     ".stablehlo.mlirbc")) {
+    emissionTarget = onnx_frontend::EmitStablehloIR;
+    doSerial = true;
+  } else if (onnx_frontend::EndsWith(onnx_mlir::outputBaseName,
+                                     ".stablehlo.elide.mlir")) {
+    emissionTarget = onnx_frontend::EmitStablehloIR;
     emitElide = true;
+  } else if (onnx_frontend::EndsWith(onnx_mlir::outputBaseName,
+                                     ".stablehlo.elide.mlirbc")) {
+    emissionTarget = onnx_frontend::EmitStablehloIR;
+    emitElide = true;
+    doSerial = true;
   } else {
     std::cerr << "Invalid output extension name" << std::endl;
     return 1;
+  }
+
+  std::string serializeVersion("");
+  if (doSerial) {
+    // get mininum stablehlo version between input and onnx-frontend.
+    onnx_frontend::getStablehloSerialVersion(onnx_frontend::serialVersion,
+                                             serializeVersion);
   }
 
   mlir::OwningOpRef<mlir::ModuleOp> module;
@@ -84,12 +102,13 @@ int main(int argc, char *argv[]) {
 
   mlir::PassManager pm(module.get()->getName(),
                        mlir::OpPassManager::Nesting::Implicit);
-  if (emissionTarget == onnx_frontend::EmitMhloIR) {
-    onnx_frontend::addCustomizedONNXToMhloPasses(
+  if (emissionTarget == onnx_frontend::EmitStablehloIR) {
+    onnx_frontend::addCustomizedONNXToStablehloPasses(
         pm, onnx_frontend::customCallOps, onnx_frontend::enableUnroll);
-    onnx_frontend::addVerifyONNXToMhloPasses(pm);
+    onnx_frontend::addVerifyONNXToStablehloPasses(pm);
   }
-  auto status = onnx_frontend::compileModule(
-      module, pm, onnx_mlir::outputBaseName, emissionTarget, emitElide);
+  auto status =
+      onnx_frontend::compileModule(module, pm, onnx_mlir::outputBaseName,
+                                   emissionTarget, emitElide, serializeVersion);
   return status;
 }

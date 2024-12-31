@@ -17,6 +17,7 @@
 
 #include "byteir/Dialect/Shape/IR/ShapeExtOps.h"
 #include "byteir/Dialect/mhlo/DynamicShapeOpRegister/Register.h"
+#include "byteir/Dialect/mhlo/Util/CustomCallUtil.h"
 #include "mhlo/IR/hlo_ops.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -60,8 +61,8 @@ LogicalResult InsertReshapeShapeConstraints(Operation *op, OpBuilder &builder) {
   SmallVector<Value> dimOfOperand, dimOfResult;
   auto operand = op->getOperand(0);
   auto result = op->getResult(0);
-  auto oprRankedTensor = operand.getType().dyn_cast<RankedTensorType>();
-  auto resRankedTensor = result.getType().dyn_cast<RankedTensorType>();
+  auto oprRankedTensor = dyn_cast<RankedTensorType>(operand.getType());
+  auto resRankedTensor = dyn_cast<RankedTensorType>(result.getType());
   if (!oprRankedTensor || !resRankedTensor)
     return failure();
   auto inputShape = oprRankedTensor.getShape();
@@ -98,7 +99,7 @@ LogicalResult InsertReshapeShapeConstraints(Operation *op, OpBuilder &builder) {
   builder.create<shape_ext::MeetOp>(op->getLoc(), oprSize, resSize);
 
   return success();
-};
+}
 
 void mlir::registerReshapeShapeConstraints() {
   static InsertShapeConstraintRegistration shapeRegister(
@@ -115,7 +116,8 @@ void mlir::registerDynamicReshapeInferReturnTypeComponents() {
   static InferReturnTypeComponentsRegistration shapeRegister(
       mhlo::DynamicReshapeOp::getOperationName(),
       [](MLIRContext *context, std::optional<Location>,
-         ValueShapeRange operands, DictionaryAttr, RegionRange,
+         ValueShapeRange operands, DictionaryAttr, OpaqueProperties properties,
+         RegionRange,
          SmallVectorImpl<ShapedTypeComponents> &inferredReturnTypes) {
         mlir::ShapeAdaptor shapeAdaptor = operands.getValueAsShape(1);
         if (!shapeAdaptor)

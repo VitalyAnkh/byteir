@@ -99,13 +99,13 @@ def LinalgExtInterface : OpInterface<"LinalgExtOp"> {
       /*desc=*/[{
         Return the input operands.
       }],
-      /*retTy=*/"OpOperandVector",
+      /*retTy=*/"SmallVector<OpOperand *>",
       /*methodName=*/"getInputOperands",
       /*args=*/(ins),
       /*methodBody=*/"",
       /*defaultImplementation=*/[{
         int64_t numInputs = getNumInputs();
-        OpOperandVector result;
+        SmallVector<OpOperand *> result;
         result.reserve(numInputs);
         llvm::transform(
           this->getOperation()->getOpOperands().take_front(numInputs),
@@ -131,17 +131,17 @@ def LinalgExtInterface : OpInterface<"LinalgExtOp"> {
       /*desc=*/[{
         Return the subset of input operands that are of buffer type.
       }],
-      /*retTy=*/"OpOperandVector",
+      /*retTy=*/"SmallVector<OpOperand *>",
       /*methodName=*/"getInputBufferOperands",
       /*args=*/(ins),
       /*methodBody=*/"",
       /*defaultImplementation=*/[{
-        OpOperandVector result;
+        SmallVector<OpOperand *> result;
         result.reserve(getNumInputs());
         llvm::copy_if(getInputOperands(),
           std::back_inserter(result),
           [](OpOperand *opOperand) {
-            return opOperand->get().getType().template isa<MemRefType>();
+            return isa<MemRefType>(opOperand->get().getType());
           });
         return result;
       }]
@@ -150,17 +150,17 @@ def LinalgExtInterface : OpInterface<"LinalgExtOp"> {
       /*desc=*/[{
         Return the subset of input operands that are of tensor type.
       }],
-      /*retTy=*/"OpOperandVector",
+      /*retTy=*/"SmallVector<OpOperand *>",
       /*methodName=*/"getInputTensorOperands",
       /*args=*/(ins),
       /*methodBody=*/"",
       /*defaultImplementation=*/[{
-        OpOperandVector result;
+        SmallVector<OpOperand *> result;
         result.reserve(getNumInputs());
         llvm::copy_if(getInputOperands(),
           std::back_inserter(result),
           [](OpOperand *opOperand) {
-            return opOperand->get().getType().template isa<RankedTensorType>();
+            return isa<RankedTensorType>(opOperand->get().getType());
           });
         return result;
       }]
@@ -172,13 +172,13 @@ def LinalgExtInterface : OpInterface<"LinalgExtOp"> {
       /*desc=*/[{
         Return the output operands.
       }],
-      /*retTy=*/"OpOperandVector",
+      /*retTy=*/"SmallVector<OpOperand *>",
       /*methodName=*/"getOutputOperands",
       /*args=*/(ins),
       /*methodBody=*/"",
       /*defaultImplementation=*/[{
         int64_t numOutputs = getNumOutputs();
-        OpOperandVector result;
+        SmallVector<OpOperand *> result;
         result.reserve(numOutputs);
         llvm::transform(
           this->getOperation()->getOpOperands()
@@ -219,17 +219,17 @@ def LinalgExtInterface : OpInterface<"LinalgExtOp"> {
       /*desc=*/[{
         Return the subset of output operands that are of buffer type.
       }],
-      /*retTy=*/"OpOperandVector",
+      /*retTy=*/"SmallVector<OpOperand *>",
       /*methodName=*/"getOutputBufferOperands",
       /*args=*/(ins),
       /*methodBody=*/"",
       /*defaultImplementation=*/[{
-        OpOperandVector result;
+        SmallVector<OpOperand *> result;
         result.reserve(getNumOutputs());
         llvm::copy_if(getOutputOperands(),
           std::back_inserter(result),
           [](OpOperand *opOperand) {
-            return opOperand->get().getType().template isa<MemRefType>();
+            return isa<MemRefType>(opOperand->get().getType());
           });
         return result;
       }]
@@ -238,17 +238,17 @@ def LinalgExtInterface : OpInterface<"LinalgExtOp"> {
       /*desc=*/[{
         Return the subset of output operands that are of tensor type.
       }],
-      /*retTy=*/"OpOperandVector",
+      /*retTy=*/"SmallVector<OpOperand *>",
       /*methodName=*/"getOutputTensorOperands",
       /*args=*/(ins),
       /*methodBody=*/"",
       /*defaultImplementation=*/[{
-        OpOperandVector result;
+        SmallVector<OpOperand *> result;
         result.reserve(getNumOutputs());
         llvm::copy_if(getOutputOperands(),
           std::back_inserter(result),
           [](OpOperand *opOperand) {
-            return opOperand->get().getType().template isa<RankedTensorType>();
+            return isa<RankedTensorType>(opOperand->get().getType());
           });
         return result;
       }]
@@ -267,7 +267,7 @@ def LinalgExtInterface : OpInterface<"LinalgExtOp"> {
         llvm::transform(getOutputBufferOperands(),
           std::back_inserter(result),
           [](OpOperand *opOperands) {
-            return opOperands->get().getType().cast<MemRefType>();
+            return cast<MemRefType>(opOperands->get().getType());
           });
         return result;
       }]
@@ -286,7 +286,7 @@ def LinalgExtInterface : OpInterface<"LinalgExtOp"> {
         llvm::transform(getOutputTensorOperands(),
           std::back_inserter(result),
           [](OpOperand *opOperands) {
-            return opOperands->get().getType().cast<RankedTensorType>();
+            return cast<RankedTensorType>(opOperands->get().getType());
           });
         return result;
       }]
@@ -298,13 +298,13 @@ def LinalgExtInterface : OpInterface<"LinalgExtOp"> {
       /*desc=*/[{
         Return the range over input and output operands.
       }],
-      /*retTy=*/"OpOperandVector",
+      /*retTy=*/"SmallVector<OpOperand *>",
       /*methodName=*/"getInputAndOutputOperands",
       /*args=*/(ins),
       /*methodBody=*/"",
       /*defaultImplementation=*/[{
         int64_t numInputsAndOutputs = getNumInputsAndOutputs();
-        OpOperandVector result;
+        SmallVector<OpOperand *> result;
         result.reserve(numInputsAndOutputs);
         llvm::transform(
           this->getOperation()->getOpOperands()
@@ -323,7 +323,7 @@ def LinalgExtInterface : OpInterface<"LinalgExtOp"> {
       /*args=*/(ins "OpOperand *":$opOperand),
       /*methodBody=*/"",
       /*defaultImplementation=*/[{
-        if (!opOperand->get().getType().template isa<RankedTensorType>())
+        if (!isa<RankedTensorType>(opOperand->get().getType()))
           return false;
         if (opOperand->getOperandNumber() < $_op.getNumInputs())
           return true;
@@ -339,7 +339,7 @@ def LinalgExtInterface : OpInterface<"LinalgExtOp"> {
       /*args=*/(ins "OpOperand *":$opOperand),
       /*methodBody=*/"",
       /*defaultImplementation=*/[{
-        if (!opOperand->get().getType().template isa<RankedTensorType>())
+        if (!isa<RankedTensorType>(opOperand->get().getType()))
           return false;
         if (opOperand->getOperandNumber() >= $_op.getNumInputs())
           return true;
@@ -357,7 +357,7 @@ def LinalgExtInterface : OpInterface<"LinalgExtOp"> {
       /*defaultImplementation=*/[{
         assert(opOperand->getOwner() == this->getOperation());
         if (auto shapedType =
-              opOperand->get().getType().template dyn_cast<ShapedType>())
+              dyn_cast<ShapedType>(opOperand->get().getType()))
           return shapedType.getRank();
         return 0;
       }]
@@ -373,7 +373,7 @@ def LinalgExtInterface : OpInterface<"LinalgExtOp"> {
       /*defaultImplementation=*/[{
         assert(opOperand->getOwner() == this->getOperation());
         if (auto shapedType =
-              opOperand->get().getType().template dyn_cast<ShapedType>())
+              dyn_cast<ShapedType>(opOperand->get().getType()))
           return shapedType.getShape();
         return {};
       }]
@@ -397,7 +397,7 @@ def LinalgExtInterface : OpInterface<"LinalgExtOp"> {
       /*desc=*/[{
         Return operands that are neither inputs nor outputs.
       }],
-      /*retTy=*/"OpOperandVector",
+      /*retTy=*/"SmallVector<OpOperand *>",
       /*methodName=*/"getNonInputOrOutputOperands",
       /*args=*/(ins),
       /*methodBody=*/"",
@@ -407,7 +407,7 @@ def LinalgExtInterface : OpInterface<"LinalgExtOp"> {
         assert(numInputsAndOutputs <= numOperands);
         if (numInputsAndOutputs == numOperands)
           return {};
-        OpOperandVector result;
+        SmallVector<OpOperand *> result;
         result.reserve(numOperands - numInputsAndOutputs);
         llvm::transform(
           this->getOperation()->getOpOperands()
@@ -544,6 +544,8 @@ def LinalgExtInterface : OpInterface<"LinalgExtOp"> {
     >
   ];
 
+  let cppNamespace = "::mlir::linalg_ext";
+
   let extraClassDeclaration = [{
     /// Returns the value that expresses the shape of the output in terms of
     /// shape of the input operands where possible.
@@ -559,8 +561,8 @@ def LinalgExtInterface : OpInterface<"LinalgExtOp"> {
 
     private:
     void setOperandSegmentAt(unsigned idx, unsigned val) {
-      auto attr = (*this)->getAttr("operand_segment_sizes")
-        .cast<DenseIntElementsAttr>();
+      auto attr = cast<DenseIntElementsAttr>(
+          (*this)->getAttr("operand_segment_sizes"));
       unsigned i = 0;
       auto newAttr = attr.mapValues(IntegerType::get(getContext(), 32),
         [&](const APInt &v) { return (i++ == idx) ? APInt(32, val) : v; });

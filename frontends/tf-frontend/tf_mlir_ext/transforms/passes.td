@@ -52,7 +52,7 @@ def RewriteToCustomCallOps: Pass<"rewrite-to-custom-call", "ModuleOp"> {
                "Operations to be wrapped",
                "llvm::cl::ZeroOrMore">,
     Option<"keepBody", "keep-body", "bool", /*default=*/"false",
-           "keep func body">,	
+           "keep func body">,
   ];
   let dependentDialects = [
     "mlir::TF::TensorFlowDialect",
@@ -67,6 +67,8 @@ def MhloLegalizeTfExt: Pass<"mhlo-legalize-tf-ext", "func::FuncOp"> {
     "mlir::TF::TensorFlowDialect",
     "mlir::mhlo::MhloDialect",
     "mlir::tensor::TensorDialect",
+    "mlir::shape::ShapeDialect",
+    "mlir::scf::SCFDialect",
   ];
 }
 
@@ -75,6 +77,10 @@ def FuseTFOps : Pass<"fuse-tf-ops", "func::FuncOp"> {
   let constructor = "mlir::tfext::createFuseTFOpsPass()";
   let dependentDialects = [
     "mlir::TF::TensorFlowDialect",
+  ];
+  let options = [
+    Option<"replaceWhereToStatic", "replace-where-to-static", "bool", /*default=*/"false",
+           "replace where to mul+reduce_sum to convert to static shape">,
   ];
 }
 
@@ -106,6 +112,28 @@ def RewriteFuncAttrToByteIR: Pass<"rewrite-func-attr-to-byteir", "func::FuncOp">
 def TFSwitchMergeToIf : Pass<"tf-switch-merge-to-if", "func::FuncOp"> {
   let summary = "transform merge and switch to TF.If";
   let constructor = "mlir::tfext::createTFSwitchMergeToIfPass()";
+}
+
+def ConvertRepeatToTile : Pass<"convert-repeat-to-tile", "func::FuncOp"> {
+  let summary = "convert repeat to tile + reshape";
+  let constructor = "mlir::tfext::createConvertRepeatToTilePass()";
+}
+
+def SetRepeatOutBatchSize : Pass<"set-repeat-out-batch-size", "func::FuncOp"> {
+  let summary = "set repeat out batch size";
+  let constructor = "mlir::tfext::createSetRepeatOutBatchSizePass()";
+  let options = [
+    Option<"repeatOutBatchSize", "repeat-out-batch-size", "int64_t", /*default=*/"-1",
+           "batch size of repeat output tensor">,
+  ];
+}
+
+def InlineFuncCallInScfIf : Pass<"inline-func-call-in-scf-if", "ModuleOp"> {
+  let summary = "inline func::CallOp in scf.if op";
+  let constructor = "mlir::tfext::createInlineFuncCallInScfIfPass()";
+  let dependentDialects = [
+    "mlir::scf::SCFDialect",
+  ];
 }
 
 #endif // TF_MLIR_EXT_PASSES

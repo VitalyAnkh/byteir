@@ -1,4 +1,4 @@
-// RUN: byteir-opt -gen-ptx-config='use-bare-ptr-memref-call-conv=1' -convert-to-byre %s | FileCheck %s
+// RUN: byteir-opt -gen-ptx-config='use-bare-ptr-memref-call-conv=1' --inline --gpu-launch-func-to-byre --allow-unregistered-dialect %s | FileCheck %s
 
 module attributes {gpu.container_module}  {
   func.func private @Unknown0(%arg0: memref<1x128xi64>, %arg1: memref<128xi64>, %arg2: memref<128xi64>, %arg3: memref<128xf64>) -> (memref<128xui32>, memref<128x1xi64>, memref<128xi1>) attributes {byre_compute_name = "Unknown0", __byteir_elementwise_fusion__} {
@@ -8,7 +8,7 @@ module attributes {gpu.container_module}  {
     %0 = memref.collapse_shape %arg0 [[0, 1]] : memref<1x128xi64> into memref<128xi64>
     %1 = memref.alloc() : memref<128xui32>
     %2 = memref.alloc() : memref<128xi64>
-    %3 = memref.expand_shape %2 [[0, 1]] : memref<128xi64> into memref<128x1xi64>
+    %3 = memref.expand_shape %2 [[0, 1]] output_shape [128, 1] : memref<128xi64> into memref<128x1xi64>
     %4 = memref.alloc() : memref<128xi1>
     gpu.launch_func  @Unknown0_kernel::@Unknown0_kernel blocks in (%c4, %c1, %c1) threads in (%c32, %c1, %c1) args(%0 : memref<128xi64>, %1 : memref<128xui32>, %arg1 : memref<128xi64>, %arg2 : memref<128xi64>, %2 : memref<128xi64>, %arg3 : memref<128xf64>, %4 : memref<128xi1>)
     return %1, %3, %4 : memref<128xui32>, memref<128x1xi64>, memref<128xi1>
@@ -58,6 +58,6 @@ module attributes {gpu.container_module}  {
 
   // CHECK-NOT: func.func private @Unknown0
   // CHECK: byre.compute @PTXOp
-  // CHEKC-SAME: {BlockSize.x = 32 : i32, GridSize.x = 4 : i32, call_convention = "bare_ptr", kernel_name = "Unknown0_kernel"}
+  // CHECK-SAME: {BlockSize.x = 32 : i32, BlockSize.y = 1 : i32, BlockSize.z = 1 : i32, GridSize.x = 4 : i32, GridSize.y = 1 : i32, GridSize.z = 1 : i32, call_convention = "bare_ptr", device_file_name = "unified", kernel_name = "Unknown0_kernel"}
 }
 

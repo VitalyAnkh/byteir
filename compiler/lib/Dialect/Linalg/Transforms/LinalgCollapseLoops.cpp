@@ -75,6 +75,9 @@ getCollapsibleLoops(linalg::GenericOp genericOp,
 
   llvm::SmallDenseSet<unsigned> pLoops(pDims.begin(), pDims.end());
 
+  // There is no mechanism to tell the collapsed indexes to
+  // `tensor.expand_shape`. We only can collapse partial loops
+  // that contain at most one dynamic dims.
   auto hasAllMapsSameSequence = [&](AffineExpr preExpr, AffineExpr nextExpr) {
     for (AffineMap map : genericOp.getIndexingMapsArray()) {
       auto prePos = map.getResultPosition(preExpr);
@@ -86,30 +89,61 @@ getCollapsibleLoops(linalg::GenericOp genericOp,
         if (!nextPos.has_value())
           return false;
 
-        if (prePos.value() + 1 != nextPos.value())
+        if (prePos.value() != nextPos.value() + 1)
           return false;
       }
     }
     return true;
   };
 
+  auto hasMultipleDynamicDims =
+      [&](const SmallVector<AffineExpr, 4> &exprOfRange) {
+        for (auto [index, map] :
+             llvm::enumerate(genericOp.getIndexingMapsArray())) {
+          auto operandType =
+              dyn_cast<ShapedType>(genericOp->getOperand(index).getType());
+          if (operandType) {
+            int64_t dynamicDimCount = 0;
+            for (auto expr : exprOfRange) {
+              auto pos = map.getResultPosition(expr);
+              if (pos.has_value() &&
+                  operandType.getShape()[pos.value()] == ShapedType::kDynamic) {
+                dynamicDimCount += 1;
+              }
+            }
+            if (dynamicDimCount > 1)
+              return false;
+          }
+        }
+        return true;
+      };
+
   ReassociationIndices range;
   AffineExpr preExpr;
-  for (auto nextExpr : genericOp.getIndexingMapsArray().front().getResults()) {
-    unsigned pos = nextExpr.cast<AffineDimExpr>().getPosition();
+  SmallVector<AffineExpr, 4> exprOfRange;
+  // collapse loop greedily from the inside out
+  for (auto nextExpr :
+       llvm::reverse(genericOp.getIndexingMapsArray().front().getResults())) {
+    unsigned pos = cast<AffineDimExpr>(nextExpr).getPosition();
     if (!range.empty()) {
-      if (!hasAllMapsSameSequence(preExpr, nextExpr) || !pLoops.count(pos)) {
+      auto exprOfRangeWithNext = exprOfRange;
+      exprOfRangeWithNext.push_back(nextExpr);
+      if (!hasAllMapsSameSequence(preExpr, nextExpr) || !pLoops.count(pos) ||
+          !hasMultipleDynamicDims(exprOfRangeWithNext)) {
         if (range.size() > 1)
-          contiguousLoops.push_back({range.begin(), range.end()});
+          contiguousLoops.push_back({range.rbegin(), range.rend()});
         range.clear();
+        exprOfRange.clear();
       }
     }
     preExpr = nextExpr;
-    if (pLoops.count(pos))
+    if (pLoops.count(pos)) {
       range.push_back(pos);
+      exprOfRange.push_back(nextExpr);
+    }
   }
   if (range.size() > 1)
-    contiguousLoops.push_back(range);
+    contiguousLoops.push_back({range.rbegin(), range.rend()});
 
   LLVM_DEBUG({
     llvm::dbgs() << "Collapsing dimensions if possible: ";
@@ -127,11 +161,6 @@ getCollapsibleLoops(linalg::GenericOp genericOp,
 
 /// Returns true if the given op is collapsable.
 static bool isEligibleForCollapse(linalg::GenericOp genericOp) {
-  // TODO(guray) There is no mechanism to tell the collapsed indexes to
-  // `tensor.expand_shape`. Once we have this support in MLIR, we can enable
-  // dynamic tensor shapes.
-  if (genericOp.hasDynamicShape())
-    return false;
 
   // TODO(guray) Currently we can only collapse when result of all the
   // AffineMaps are dimensions. Possible to collapse cases like
@@ -150,7 +179,7 @@ static bool isEligibleForCollapse(linalg::GenericOp genericOp) {
     return false;
 
   if (!llvm::all_of(genericOp->getOperandTypes(), [](Type t) {
-        if (auto memrefType = t.dyn_cast_or_null<MemRefType>()) {
+        if (auto memrefType = dyn_cast_or_null<MemRefType>(t)) {
           return memrefType.getLayout().isIdentity();
         }
         return true;
@@ -282,7 +311,7 @@ getCollapsedOpIndexingMap(AffineMap indexingMap,
   auto origOpToCollapsedOpMapping =
       collapsingInfo.getOrigOpToCollapsedOpMapping();
   for (auto expr : indexingMap.getResults()) {
-    unsigned dim = expr.cast<AffineDimExpr>().getPosition();
+    unsigned dim = cast<AffineDimExpr>(expr).getPosition();
     // If the dim is not the first of the collapsed dim, do nothing.
     if (origOpToCollapsedOpMapping[dim].second != 0)
       continue;
@@ -308,7 +337,7 @@ getOperandReassociation(AffineMap indexingMap,
       collapsingInfo.getCollapsedOpToOrigOpMapping();
   while (counter < indexingMap.getNumResults()) {
     unsigned dim =
-        indexingMap.getResult(counter).cast<AffineDimExpr>().getPosition();
+        cast<AffineDimExpr>(indexingMap.getResult(counter)).getPosition();
     // This is the start of a collapsed dimensions of the iteration that
     // is gauranteed to be preserved in the indexing map. The number of folded
     // dims is obtained from the collapsed op to original op mapping.
@@ -340,7 +369,7 @@ static Value getCollapsedOpOperand(Location loc, GenericOp genericOp,
     return operand;
 
   // Insert a reshape to collapse the dimensions.
-  if (genericOp.hasBufferSemantics()) {
+  if (genericOp.hasPureBufferSemantics()) {
     auto reshapeOp = builder.create<memref::CollapseShapeOp>(
         loc, operand, operandReassociation);
     return reshapeOp.getResult();
@@ -414,8 +443,8 @@ FailureOr<SmallVector<Value>> collapseGenericOpIterationDimsEx(
       cast<LinalgOp>(genericOp.getOperation())
           .createLoopRanges(rewriter, genericOp.getLoc());
   auto opFoldIsConstantValue = [](OpFoldResult ofr, int64_t value) {
-    if (auto attr = ofr.dyn_cast<Attribute>())
-      return attr.cast<IntegerAttr>().getInt() == value;
+    if (auto attr = dyn_cast<Attribute>(ofr))
+      return cast<IntegerAttr>(attr).getInt() == value;
     llvm::APInt actual;
     return matchPattern(ofr.get<Value>(), m_ConstantInt(&actual)) &&
            actual.getSExtValue() == value;
@@ -453,16 +482,16 @@ FailureOr<SmallVector<Value>> collapseGenericOpIterationDimsEx(
   SmallVector<Value> outputOperands;
   resultTypes.reserve(genericOp.getNumDpsInits());
   outputOperands.reserve(genericOp.getNumDpsInits());
-  for (OpOperand *output : genericOp.getDpsInitOperands()) {
-    Value newOutput =
-        getCollapsedOpOperand(loc, genericOp, output, collapsingInfo, rewriter);
+  for (OpOperand &output : genericOp.getDpsInitsMutable()) {
+    Value newOutput = getCollapsedOpOperand(loc, genericOp, &output,
+                                            collapsingInfo, rewriter);
     outputOperands.push_back(newOutput);
     resultTypes.push_back(newOutput.getType());
   }
 
   // Create the generic op.
   linalg::GenericOp collapsedGenericOp;
-  if (genericOp.hasBufferSemantics()) {
+  if (genericOp.hasPureBufferSemantics()) {
     collapsedGenericOp = rewriter.create<linalg::GenericOp>(
         loc, inputOperands, outputOperands, indexingMaps, iteratorTypes,
         [](OpBuilder &builder, Location loc, ValueRange args) {});
@@ -497,14 +526,14 @@ FailureOr<SmallVector<Value>> collapseGenericOpIterationDimsEx(
     Value collapsedOpResult =
         collapsedGenericOp->getResult(originalResult.index());
     auto originalResultType =
-        originalResult.value().getType().cast<ShapedType>();
-    auto collapsedOpResultType = collapsedOpResult.getType().cast<ShapedType>();
+        cast<ShapedType>(originalResult.value().getType());
+    auto collapsedOpResultType = cast<ShapedType>(collapsedOpResult.getType());
     if (collapsedOpResultType.getRank() != originalResultType.getRank()) {
       AffineMap indexingMap =
           genericOp.getIndexingMapMatchingResult(originalResult.value());
       SmallVector<ReassociationIndices> reassociation =
           getOperandReassociation(indexingMap, collapsingInfo);
-      if (genericOp.hasBufferSemantics()) {
+      if (genericOp.hasPureBufferSemantics()) {
         Value result = rewriter.create<memref::ExpandShapeOp>(
             loc, originalResultType, collapsedOpResult, reassociation);
         results.push_back(result);

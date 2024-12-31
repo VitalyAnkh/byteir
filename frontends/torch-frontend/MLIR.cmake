@@ -23,7 +23,7 @@ if (NOT DEFINED MLIR_DIR OR "${MLIR_DIR}" STREQUAL "MLIR_DIR-NOTFOUND")
       -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
       -DCMAKE_BUILD_TYPE=Release
       -DLLVM_ENABLE_PROJECTS=mlir
-      -DLLVM_TARGETS_TO_BUILD=X86\;NVPTX\;AMDGPU
+      -DLLVM_TARGETS_TO_BUILD=X86
       -DLLVM_ENABLE_ASSERTIONS=ON
       -DMLIR_ENABLE_BINDINGS_PYTHON=ON
 
@@ -98,3 +98,7 @@ function(add_torch_frontend_executable name)
     )
 endfunction(add_torch_frontend_executable)
 
+function(add_byteir_dialect_library name)
+  set_property(GLOBAL APPEND PROPERTY BYTEIR_DIALECT_LIBS ${name})
+  add_mlir_library(${ARGV} DEPENDS mlir-headers)
+endfunction(add_byteir_dialect_library)

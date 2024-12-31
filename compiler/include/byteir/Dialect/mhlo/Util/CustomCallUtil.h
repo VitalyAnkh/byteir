@@ -89,8 +89,16 @@ constexpr llvm::StringRef getRngUniformName() {
   return CUSTOM_CALL_NAME_PREFIX "rng_uniform";
 }
 
+constexpr llvm::StringRef getRngNormalName() {
+  return CUSTOM_CALL_NAME_PREFIX "rng_normal";
+}
+
 constexpr llvm::StringRef getFlashAttnFwdName() {
   return CUSTOM_CALL_NAME_PREFIX "flash_attn_fwd";
+}
+
+constexpr llvm::StringRef getFlashAttnKVCacheName() {
+  return CUSTOM_CALL_NAME_PREFIX "flash_attn_kvcache";
 }
 
 constexpr llvm::StringRef getFlashAttnBwdName() {
@@ -113,11 +121,15 @@ constexpr llvm::StringRef getDynamicMaskStitchName() {
   return TF_NAME_PREFIX "DynamicMaskStitch";
 }
 
-constexpr llvm::StringRef getWhereName() { return TF_NAME_PREFIX "Where"; }
+constexpr llvm::StringRef getScatterNdName() {
+  return TF_NAME_PREFIX "ScatterNd";
+}
 constexpr llvm::StringRef getStridedSliceName() {
   return TF_NAME_PREFIX "StridedSlice";
 }
-
+constexpr llvm::StringRef getBatchMatMulName() {
+  return TF_NAME_PREFIX "BatchMatMul";
+}
 } // namespace mlir
 
 #undef TF_NAME_PREFIX

@@ -1,5 +1,6 @@
 # Exclude tests from libMLIR.so
 add_mlir_library(ByteIRTestAnalysis
+ TestGraphClusteringByDeviceOpNum.cpp
   TestPrintLiveness.cpp
   TestPrintShapeAnalysis.cpp
   TestPrintSideEffect.cpp
@@ -10,5 +11,4 @@ add_mlir_library(ByteIRTestAnalysis
 
   LINK_LIBS PUBLIC
   ByteIRAnalysis
-  LmhloDialect
   )

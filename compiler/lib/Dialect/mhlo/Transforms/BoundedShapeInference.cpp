@@ -24,6 +24,7 @@
 #include "mhlo/IR/hlo_ops.h"
 #include "mlir/Analysis/DataFlow/ConstantPropagationAnalysis.h"
 #include "mlir/Analysis/DataFlow/DeadCodeAnalysis.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/Operation.h"
@@ -51,7 +52,7 @@ LogicalResult constructNewArgumentTypes(func::FuncOp funcOp,
   for (unsigned i = 0; i < funcOp.getNumArguments(); ++i) {
     Type origType = funcOp.getArgumentTypes()[i];
 
-    auto origRankedType = origType.dyn_cast<RankedTensorType>();
+    auto origRankedType = dyn_cast<RankedTensorType>(origType);
     if (!origRankedType) {
       LLVM_DEBUG(llvm::dbgs()
                  << "Argument " << i << "is not of type RankedTensorType.\n");
@@ -125,28 +126,33 @@ struct BoundedShapeInferencePass
       }
 
       DataFlowSolver solver;
-      solver.load<MhloBoundedShapeAnalysis>();
-      solver.load<MhloShapeValueAnalysis>();
       solver.load<DeadCodeAnalysis>();
-      if (failed(solver.initializeAndRun(funcOp)))
+      solver.load<MhloBoundedValueAnalysis>();
+      solver.load<MhloBoundedShapeValueAnalysis>();
+      solver.load<MhloBoundedShapeAnalysis>();
+      if (failed(solver.initializeAndRun(funcOp))) {
+        llvm::outs() << "Bounded shape inference failure()\n";
         return signalPassFailure();
+      }
 
       funcOp->walk([&](Operation *op) {
         for (auto &&it : op->getResults()) {
-          auto originalType = it.getType().dyn_cast<ShapedType>();
+          auto originalType = dyn_cast<ShapedType>(it.getType());
           if (!originalType || originalType.hasStaticShape())
             continue;
 
           ShapedType newType;
-          if (auto lattice = solver.lookupState<ShapeLattice>(it)) {
-            if (!lattice->getValue().isUninitialized())
-              newType = lattice->getValue().getType().dyn_cast<ShapedType>();
+          if (auto *lattice = solver.lookupState<BoundedShapeLattice>(it)) {
+            if (!lattice->getValue().isUninitialized()) {
+              assert(lattice->getValue().getType());
+              newType = dyn_cast<ShapedType>(lattice->getValue().getType());
+            }
           }
 
           if (!newType || !newType.hasRank())
             continue;
 
-          auto tx = it.getType().dyn_cast<RankedTensorType>();
+          auto tx = dyn_cast<RankedTensorType>(it.getType());
 
           ArrayRef<int64_t> shape = newType.getShape();
           OpBuilder builder(op);
@@ -163,6 +169,31 @@ struct BoundedShapeInferencePass
       });
     }
     assert(returnOp && "there must be return op in func");
+    funcOp->walk([&](scf::IfOp op) {
+      auto resultTypes = op->getResultTypes();
+      auto *thenBlock = op.thenBlock();
+      auto *elseBlock = op.elseBlock();
+      if (thenBlock) {
+        auto *retOp = thenBlock->getTerminator();
+        auto operands = retOp->getOperands();
+        assert(operands.size() == resultTypes.size());
+        for (auto it : llvm::zip(operands, resultTypes)) {
+          auto operand = std::get<0>(it);
+          auto type = std::get<1>(it);
+          operand.setType(type);
+        }
+      }
+      if (elseBlock) {
+        auto *retOp = elseBlock->getTerminator();
+        auto operands = retOp->getOperands();
+        assert(operands.size() == resultTypes.size());
+        for (auto it : llvm::zip(operands, resultTypes)) {
+          auto operand = std::get<0>(it);
+          auto type = std::get<1>(it);
+          operand.setType(type);
+        }
+      }
+    });
 
     auto newFuncRetTypes = llvm::to_vector(returnOp.getOperandTypes());
     auto newFuncType =

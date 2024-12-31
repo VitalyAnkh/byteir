@@ -21,6 +21,9 @@
 #include "byteir/Dialect/Byre/ByreDialect.h"
 #include "byteir/Dialect/Byre/Transforms/BufferizableOpInterfaceImpl.h"
 #include "byteir/Dialect/Cat/IR/CatDialect.h"
+#include "byteir/Dialect/Ccl/IR/CclOps.h"
+#include "byteir/Dialect/Ccl/Transforms/CclBufferizeOpInterfaceImpl.h"
+#include "byteir/Dialect/Lccl/LcclOps.h"
 #include "byteir/Dialect/Linalg/IR/LinalgExtOps.h"
 #include "byteir/Dialect/Linalg/Transforms/BufferizableOpInterfaceImpl.h"
 #include "byteir/Utils/OpInterfaceUtils.h"
@@ -77,11 +80,13 @@ namespace {
 struct OneShotBufferizePass
     : public impl::OneShotBufferizeBase<OneShotBufferizePass> {
   void getDependentDialects(DialectRegistry &registry) const override {
+    // clang-format off
     registry.insert<ace::AceDialect, bufferization::BufferizationDialect,
                     byre::ByreDialect, linalg::LinalgDialect,
                     linalg_ext::LinalgExtDialect, memref::MemRefDialect,
                     mhlo::MhloDialect, scf::SCFDialect, shape::ShapeDialect,
-                    vector::VectorDialect>();
+                    vector::VectorDialect, ccl::CclDialect, lccl::LcclDialect>();
+    // clang-format on
     byre::registerBufferizableOpInterfaceExternalModels(registry);
     arith::registerBufferizableOpInterfaceExternalModels(registry);
     bufferization::func_ext::registerBufferizableOpInterfaceExternalModels(
@@ -93,6 +98,7 @@ struct OneShotBufferizePass
     shape::registerBufferizableOpInterfaceExternalModels(registry);
     tensor::registerBufferizableOpInterfaceExternalModels(registry);
     vector::registerBufferizableOpInterfaceExternalModels(registry);
+    ccl::registerBufferizableOpInterfaceExternalModels(registry);
   }
 
   static bool isGPUSharedMem(MemRefType type) {
@@ -119,11 +125,10 @@ struct OneShotBufferizePass
 
   void runOnOperation() override {
     bufferization::OneShotBufferizationOptions opts;
-    opts.allowReturnAllocs = true;
+    opts.allowReturnAllocsFromLoops = true;
     opts.bufferizeFunctionBoundaries = true;
     opts.setFunctionBoundaryTypeConversion(
         bufferization::LayoutMapOption::IdentityLayoutMap);
-    opts.createDeallocs = false;
     opts.bufferAlignment = 0;
     opts.allocationFn = [](OpBuilder &b, Location loc, MemRefType type,
                            ValueRange dynShape,
@@ -135,19 +140,20 @@ struct OneShotBufferizePass
       return createAlloc<memref::AllocOp>(b, loc, type, dynShape,
                                           bufferAlignment);
     };
-    opts.deallocationFn = [](OpBuilder &b, Location loc,
-                             Value allocatedBuffer) -> LogicalResult {
-      if (auto bufferType =
-              llvm::dyn_cast_or_null<MemRefType>(allocatedBuffer.getType())) {
-        if (isGPUSharedMem(bufferType)) {
-          return success();
-        }
-      }
+    // opts.deallocationFn = [](OpBuilder &b, Location loc,
+    //                          Value allocatedBuffer) -> LogicalResult {
+    //   if (auto bufferType =
+    //           llvm::dyn_cast_or_null<MemRefType>(allocatedBuffer.getType()))
+    //           {
+    //     if (isGPUSharedMem(bufferType)) {
+    //       return success();
+    //     }
+    //   }
 
-      // Default buffer deallocation via DeallocOp.
-      b.create<memref::DeallocOp>(loc, allocatedBuffer);
-      return success();
-    };
+    //   // Default buffer deallocation via DeallocOp.
+    //   b.create<memref::DeallocOp>(loc, allocatedBuffer);
+    //   return success();
+    // };
 
     // deny some corner cases
     opts.opFilter.denyOperation([&](Operation *op) {
@@ -171,7 +177,7 @@ struct OneShotBufferizePass
 namespace CallOpBufferizableOpInterfacePatch {
 /// Return the FuncOp called by `callOp`.
 static func::FuncOp getCalledFunction(CallOpInterface callOp) {
-  SymbolRefAttr sym = callOp.getCallableForCallee().dyn_cast<SymbolRefAttr>();
+  SymbolRefAttr sym = dyn_cast<SymbolRefAttr>(callOp.getCallableForCallee());
   if (!sym)
     return nullptr;
   return dyn_cast_or_null<func::FuncOp>(
@@ -204,7 +210,7 @@ LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
   for (const auto &it : llvm::enumerate(callOp.getResultTypes())) {
     unsigned returnValIdx = it.index();
     Type returnType = it.value();
-    if (!returnType.isa<TensorType>()) {
+    if (!isa<TensorType>(returnType)) {
       // Non-tensor values are returned.
       retValMapping[returnValIdx] = resultTypes.size();
       resultTypes.push_back(returnType);
@@ -222,7 +228,7 @@ LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
     Value tensorOperand = opOperand.get();
 
     // Non-tensor operands are just copied.
-    if (!tensorOperand.getType().isa<TensorType>()) {
+    if (!isa<TensorType>(tensorOperand.getType())) {
       newOperands[idx] = tensorOperand;
       continue;
     }
@@ -241,8 +247,8 @@ LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
     // from dynamic to static offset or stride (the canonicalization cannot know
     // at this point that it is really cast compatible).
     auto isGuaranteedCastCompatible = [](Type source, Type target) {
-      MemRefType sourceMemRef = source.dyn_cast_or_null<MemRefType>();
-      MemRefType targetMemRef = target.dyn_cast_or_null<MemRefType>();
+      MemRefType sourceMemRef = dyn_cast_or_null<MemRefType>(source);
+      MemRefType targetMemRef = dyn_cast_or_null<MemRefType>(target);
       if (!sourceMemRef || !targetMemRef)
         return false;
 
@@ -285,16 +291,13 @@ LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
         // TODO: Create alloc_tensor ops during TensorCopyInsertion.
         AnalysisState analysisState(options);
         FailureOr<Value> tensorAlloc = allocateTensorForShapedValue(
-            rewriter, op->getLoc(), opOperand.get(),
-            !options.createDeallocs ||
-                analysisState.isTensorYielded(opOperand.get()),
-            options);
+            rewriter, op->getLoc(), opOperand.get(), options);
         if (failed(tensorAlloc))
           return failure();
         auto memrefType = MemRefType::get(
-            opOperand.get().getType().cast<TensorType>().getShape(),
-            opOperand.get().getType().cast<TensorType>().getElementType(),
-            AffineMap(), buffer.getType().cast<MemRefType>().getMemorySpace());
+            cast<TensorType>(opOperand.get().getType()).getShape(),
+            cast<TensorType>(opOperand.get().getType()).getElementType(),
+            AffineMap(), cast<MemRefType>(buffer.getType()).getMemorySpace());
         buffer = rewriter.create<bufferization::ToMemrefOp>(
             op->getLoc(), memrefType, *tensorAlloc);
       }
@@ -330,7 +333,7 @@ bool bufferizesToMemoryRead(Operation *op, OpOperand &opOperand,
          "expected that op implements DestinationStyleOpInterface");
 
   if (opOperand.getOperandNumber() == 1 &&
-      opOperand.get().getType().cast<RankedTensorType>().getRank() == 0) {
+      cast<RankedTensorType>(opOperand.get().getType()).getRank() == 0) {
     return false;
   }
 

@@ -23,12 +23,16 @@
 #include "byteir/Dialect/GPU/Passes.h"
 #include "byteir/Dialect/SCF/Passes.h"
 #include "byteir/Dialect/Transform/Transforms/TransformDialectInterpreter.h"
+#include "byteir/Dialect/Vector/Transforms/MoveForallRegionIntoWarpOp.h"
+#include "byteir/Dialect/Vector/Transforms/Passes.h"
+#include "byteir/Dialect/Vector/Transforms/VectorWarpDistribute.h"
 #include "byteir/Dialect/mhlo/Passes.h"
 #include "byteir/Pipelines/Common/Utils.h"
 #include "byteir/Pipelines/GPU/MappingForall.h"
 #include "byteir/Transforms/Passes.h"
 #include "byteir/Transforms/RemoveFuncBody.h"
 #include "mlir/Conversion/AffineToStandard/AffineToStandard.h"
+#include "mlir/Conversion/VectorToSCF/VectorToSCF.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Dialect/GPU/Transforms/Passes.h"
 #include "mlir/Dialect/SCF/Transforms/Passes.h"
@@ -40,7 +44,6 @@ using namespace mlir::bufferization;
 
 namespace {
 void createElementwiseGPUOptPipelineImpl(OpPassManager &pm,
-                                         const bool &useBarePtrCallConv,
                                          const std::string &target) {
   // apply PromotoBufferStack to func's with
   // getByteIRElementwiseFusionAttrName
@@ -75,12 +78,32 @@ void createElementwiseGPUOptPipelineImpl(OpPassManager &pm,
   pm.addPass(createConvertFuncToGPUPass(/*bs=*/{256, 1, 1}));
 
   addCleanUpExtPassPipeline(pm);
-  pm.addNestedPass<func::FuncOp>(createGenPTXConfigPass(useBarePtrCallConv));
 }
 
 void createReductionGPUOptPipelineImpl(OpPassManager &pm) {
   GPUMappingForallOptions options;
   options.funcAnchor = getByteIRReductionFusionAttrName().str();
+  options.blockDimsHint = llvm::cl::KernelDims{256, 1, 1};
+  // vector redution to gpu shuffle & lowering
+  {
+    OpPassManager anchoredPM(func::FuncOp::getOperationName());
+    anchoredPM.addPass(
+        createMoveForallRegionIntoWarpOpPass(/* warpSize = */ 32));
+    VectorWarpDistributePassOptions options;
+    options.warpOpToSCF = true;
+    options.distributeTransferWriteOps = true;
+    options.hoistUniform = true;
+    options.propagateDistribution = true;
+    anchoredPM.addPass(createVectorWarpDistributePass(options));
+    anchoredPM.addPass(createCanonicalizerPass());
+    anchoredPM.addPass(createCSEPass());
+    anchoredPM.addPass(createScalarVectorLoweringPass());
+    anchoredPM.addPass(createCanonicalizeExtPass());
+    anchoredPM.addPass(createConvertVectorToSCFPass());
+    pm.addNestedPass<func::FuncOp>(createAnchoredPipelinePass(
+        getByteIRReductionFusionAttrName(), anchoredPM));
+  }
+
   createGPUMappingForallTransform(pm, options);
   pm.addPass(createTransformDialectInterpreter(true));
   pm.addPass(createCSEPass());
@@ -102,9 +125,12 @@ void createReductionGPUOptPipelineImpl(OpPassManager &pm) {
 }
 
 void createGPUOptPipelineImpl(OpPassManager &pm, const bool &useBarePtrCallConv,
-                              const std::string &target) {
-  createElementwiseGPUOptPipelineImpl(pm, useBarePtrCallConv, target);
+                              const std::string &target,
+                              const std::string &fileName) {
+  createElementwiseGPUOptPipelineImpl(pm, target);
   createReductionGPUOptPipelineImpl(pm);
+  pm.addNestedPass<func::FuncOp>(
+      createGenPTXConfigPass(useBarePtrCallConv, fileName));
   pm.addPass(createCollectGPUKernelPass("unified", false));
 }
 
@@ -113,5 +139,6 @@ void createGPUOptPipelineImpl(OpPassManager &pm, const bool &useBarePtrCallConv,
 void mlir::createGPUOptPipeline(OpPassManager &pm,
                                 const GPUOptPipelineOptions &options) {
   invokeOpPassPipelineBuilder(createGPUOptPipelineImpl, pm,
-                              options.useBarePtrCallConv, options.target);
+                              options.useBarePtrCallConv, options.target,
+                              options.fileName);
 }

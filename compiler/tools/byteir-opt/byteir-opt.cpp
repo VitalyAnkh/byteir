@@ -23,7 +23,9 @@
 #include "byteir/Dialect/Ccl/Passes.h"
 #include "byteir/Dialect/Ccl/TransformOps/CclTransformOps.h"
 #include "byteir/Dialect/GPU/Passes.h"
+#include "byteir/Dialect/GPU/TransformOps/GPUExtTransformOps.h"
 #include "byteir/Dialect/Lace/LaceDialect.h"
+#include "byteir/Dialect/Lccl/LcclOps.h"
 #include "byteir/Dialect/Linalg/IR/LinalgExtOps.h"
 #include "byteir/Dialect/Linalg/Passes.h"
 #include "byteir/Dialect/Linalg/TransformOps/LinalgExtTransformOps.h"
@@ -40,12 +42,6 @@
 #include "byteir/Pipelines/InitAllPipelines.h"
 #include "byteir/Transforms/Passes.h"
 #include "byteir/Utils/OpInterfaceUtils.h"
-#include "gml_st/IR/gml_st_ops.h"
-#include "gml_st/transforms/passes.h"
-#include "gml_st/transforms/test_passes.h"
-#include "lhlo/IR/lhlo_ops.h"
-#include "lhlo/transforms/passes.h"
-#include "lhlo_gpu/IR/lhlo_gpu_ops.h"
 #include "mhlo/IR/hlo_ops.h"
 #include "mhlo/IR/register.h"
 #include "mhlo/transforms/passes.h"
@@ -60,8 +56,6 @@
 #include "mlir/Support/FileUtilities.h"
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
 #include "stablehlo/dialect/Register.h"
-#include "thlo/IR/thlo_ops.h"
-#include "thlo/transforms/passes.h"
 #include "transforms/gpu_passes.h"
 #include "transforms/passes.h"
 #include "llvm/Support/CommandLine.h"
@@ -74,13 +68,13 @@ using namespace mlir;
 
 namespace byteir {
 namespace test {
-void registerTestMhloCanonicalizeExtPass();
 void registerTestByreSerialRoundtripPass();
 void registerTestConvertFuncToCustomCallPass();
 void registerTestConvertInsertionPass();
 void registerTestCustomConvertPass();
 void registerTestDTypeConversionPass();
 void registerTestFuncArgRearrangementPass();
+void registerTestGraphClusteringByDeviceOpNumPass();
 void registerTestPrintArgSideEffectPass();
 void registerTestPrintLivenessPass();
 void registerTestPrintUseRangePass();
@@ -94,13 +88,13 @@ void registerTestMergeTwoModulesPass();
 
 #ifdef BYTEIR_INCLUDE_TESTS
 void registerTestPasses() {
-  byteir::test::registerTestMhloCanonicalizeExtPass();
   byteir::test::registerTestByreSerialRoundtripPass();
   byteir::test::registerTestConvertFuncToCustomCallPass();
   byteir::test::registerTestConvertInsertionPass();
   byteir::test::registerTestCustomConvertPass();
   byteir::test::registerTestDTypeConversionPass();
   byteir::test::registerTestFuncArgRearrangementPass();
+  byteir::test::registerTestGraphClusteringByDeviceOpNumPass();
   byteir::test::registerTestPrintArgSideEffectPass();
   byteir::test::registerTestPrintLivenessPass();
   byteir::test::registerTestPrintUseRangePass();
@@ -114,13 +108,7 @@ void registerTestPasses() {
 
 int main(int argc, char **argv) {
   mlir::registerAllPasses();
-  mlir::hlo::registerLMHLOTransformsPasses();
-  mlir::registerLMHLOGPUTransformsPasses();
   mlir::mhlo::registerAllMhloPasses();
-  mlir::lmhlo::registerAllLmhloPasses();
-  mlir::thlo::registerAllThloPasses();
-  mlir::gml_st::registerGmlStPasses();
-  mlir::gml_st::registerGmlStTestPasses();
 
   registerByteIRConversionPasses();
   registerByteIRTransformsPasses();
@@ -149,7 +137,7 @@ int main(int argc, char **argv) {
   DialectRegistry registry;
   registerAllDialects(registry);
   registerAllExtensions(registry);
-  registeOpInterfaceExtensions(registry);
+  registerOpInterfaceExtensions(registry);
 
   // register ByteIR's dialects here
   mlir::stablehlo::registerAllDialects(registry);
@@ -160,7 +148,7 @@ int main(int argc, char **argv) {
   registry.insert<mlir::cat::CatDialect>();
   registry.insert<mlir::mhlo::MhloDialect>();
   registry.insert<mlir::lace::LaceDialect>();
-  registry.insert<mlir::lmhlo::LmhloDialect>();
+  registry.insert<mlir::lccl::LcclDialect>();
   registry.insert<mlir::shape_ext::ShapeExtDialect>();
   registry.insert<mlir::linalg_ext::LinalgExtDialect>();
 
@@ -169,6 +157,7 @@ int main(int argc, char **argv) {
   linalg_ext::registerTransformDialectExtension(registry);
   transform_ext::registerTransformDialectExtension(registry);
   tensor_ext::registerTilingInterfaceExternalModels(registry);
+  gpu_ext::registerTransformDialectExtension(registry);
 
   return mlir::asMainReturnCode(
       mlir::MlirOptMain(argc, argv, "ByteIR pass driver\n", registry));

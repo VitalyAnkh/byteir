@@ -18,6 +18,7 @@
 #include "byteir/Conversion/MemrefToByre/MemrefToByre.h"
 #include "byteir/Dialect/Byre/ByreDialect.h"
 #include "byteir/Dialect/Byre/Common.h"
+#include "byteir/Utils/MemUtils.h"
 #include "byteir/Utils/Utils.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -41,7 +42,7 @@ public:
   LogicalResult
   matchAndRewrite(OpTy op, typename OpTy::Adaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    if (!op.getType().getLayout().isIdentity())
+    if (!isStaticShapeAndContiguousRowMajorEx(op.getType()))
       return failure();
 
     rewriter.replaceOpWithNewOp<byre::AliasOp>(op, op.getResult().getType(),
@@ -78,7 +79,7 @@ public:
   LogicalResult
   matchAndRewrite(memref::SubViewOp op, memref::SubViewOp::Adaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    if (!op.getType().getLayout().isIdentity())
+    if (!isStaticShapeAndContiguousRowMajorEx(op.getType()))
       return failure();
 
     if (!op.getSource().getType().getLayout().isIdentity())
@@ -90,6 +91,25 @@ public:
   }
 };
 
+template <typename OpTy>
+class ConvertMemrefCastOpToByrePattern : public OpConversionPattern<OpTy> {
+public:
+  ConvertMemrefCastOpToByrePattern(MLIRContext *ctx)
+      : OpConversionPattern<OpTy>(ctx) {}
+
+  LogicalResult
+  matchAndRewrite(OpTy op, typename OpTy::Adaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (!isStaticShapeAndContiguousRowMajorEx(
+            op->getOperand(0).getType().template cast<MemRefType>()))
+      return failure();
+
+    rewriter.replaceOpWithNewOp<byre::AliasOp>(op, op.getType(),
+                                               adaptor.getSource(), 0);
+    return success();
+  }
+}; // ConvertMemrefCastOpToByrePattern
+
 class ConvertMemrefCopyOpToByrePattern
     : public OpConversionPattern<memref::CopyOp> {
 public:
@@ -99,8 +119,32 @@ public:
   matchAndRewrite(memref::CopyOp op, memref::CopyOp::Adaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
 
-    auto newOp = rewriter.replaceOpWithNewOp<byre::CopyOp>(
-        op, adaptor.getOperands()[0], adaptor.getOperands()[1]);
+    auto insertAliasOrNot = [&](Value value) -> Value {
+      auto type = cast<MemRefType>(value.getType());
+      if (type.getLayout().isIdentity()) {
+        return rewriter.create<byre::AliasOp>(
+            op.getLoc(),
+            MemRefType::get(type.getShape(), type.getElementType(),
+                            MemRefLayoutAttrInterface{}, type.getMemorySpace()),
+            value, /*offset=*/0);
+      }
+      if (isStaticShapeAndContiguousRowMajorEx(type)) {
+        auto pair = getStridesAndOffset(type);
+        return rewriter.create<byre::AliasOp>(
+            op.getLoc(),
+            MemRefType::get(type.getShape(), type.getElementType(),
+                            MemRefLayoutAttrInterface{}, type.getMemorySpace()),
+            value, pair.second);
+      }
+      return nullptr;
+    };
+
+    Value src = insertAliasOrNot(op.getSource());
+    Value target = insertAliasOrNot(op.getTarget());
+    if (!src || !target)
+      return failure();
+
+    auto newOp = rewriter.replaceOpWithNewOp<byre::CopyOp>(op, src, target);
 
     auto maybeCallee = getCalleeAttr(op);
 
@@ -114,18 +158,16 @@ public:
 private:
   static std::optional<StringAttr> getCalleeAttr(memref::CopyOp op) {
     auto ctx = op->getContext();
-    auto srcSpace =
-        op.getSource().getType().cast<MemRefType>().getMemorySpace();
-    auto dstSpace =
-        op.getTarget().getType().cast<MemRefType>().getMemorySpace();
+    auto srcSpace = cast<MemRefType>(op.getSource().getType()).getMemorySpace();
+    auto dstSpace = cast<MemRefType>(op.getTarget().getType()).getMemorySpace();
 
-    if (!srcSpace.isa_and_nonnull<StringAttr>() ||
-        !dstSpace.isa_and_nonnull<StringAttr>()) {
+    if (!isa_and_nonnull<StringAttr>(srcSpace) ||
+        !isa_and_nonnull<StringAttr>(dstSpace)) {
       return std::nullopt;
     }
 
-    auto srcRef = srcSpace.cast<StringAttr>().strref();
-    auto dstRef = dstSpace.cast<StringAttr>().strref();
+    auto srcRef = cast<StringAttr>(srcSpace).strref();
+    auto dstRef = cast<StringAttr>(dstSpace).strref();
     return StringAttr::get(ctx, srcRef + "2" + dstRef);
   }
 };
@@ -196,7 +238,10 @@ void mlir::populateMemrefToByrePattern(RewritePatternSet &patterns) {
                ConvertGetGlobalOpToByrePattern,
                ConvertReshapeLikeOpToByrePattern<memref::CollapseShapeOp>,
                ConvertReshapeLikeOpToByrePattern<memref::ExpandShapeOp>,
-               ConvertSubViewOpToByrePattern>(patterns.getContext());
+               ConvertSubViewOpToByrePattern,
+               ConvertMemrefCastOpToByrePattern<memref::CastOp>,
+               ConvertMemrefCastOpToByrePattern<memref::ReinterpretCastOp>>(
+      patterns.getContext());
 }
 
 std::unique_ptr<OperationPass<func::FuncOp>>

@@ -16,11 +16,10 @@
 //===----------------------------------------------------------------------===//
 
 #include "brt/core/context/execution_frame.h"
-
 #include "brt/core/common/common.h"
 #include "brt/core/framework/allocator.h"
+#include "brt/core/framework/device_api.h"
 #include "brt/core/ir/util.h"
-
 #include "mlir/IR/Types.h"
 
 using namespace brt;
@@ -29,6 +28,43 @@ using namespace brt::ir;
 using namespace mlir;
 
 namespace brt {
+namespace {
+void CopyBufferData(const BrtMemoryInfo &info, void *src, void *dst,
+                    size_t nbytes) {
+  auto device_api = GetDeviceAPI(info.key);
+  auto dev_type = GetDeviceType(info.key);
+  Device dev{dev_type, info.id};
+
+  switch (dev_type) {
+  case DeviceType::CPU:
+    if (device_api != nullptr) {
+      device_api->MemcpyH2H(dev, dst, src, nbytes);
+    } else {
+      std::memcpy(dst, src, nbytes);
+    }
+    break;
+
+  case DeviceType::CUDA:
+    BRT_ENFORCE(device_api != nullptr);
+    device_api->MemcpyD2D(dev, dst, src, nbytes);
+    break;
+
+  case DeviceType::UNKNOW:
+    // if unknow device has specific d2d api, user must register it.
+    // Otherwise host memcy will be used.
+    if (device_api != nullptr) {
+      device_api->MemcpyD2D(dev, dst, src, nbytes);
+    } else {
+      std::memcpy(dst, src, nbytes);
+    }
+    break;
+
+  default:
+    BRT_THROW("invalid device type");
+    break;
+  }
+}
+} // namespace
 ExecutionFrame::~ExecutionFrame() {}
 
 BRTInferenceExecutionFrame::BRTInferenceExecutionFrame(
@@ -169,20 +205,45 @@ void BRTInferenceExecutionFrame::AllocIntermediate() {
 }
 
 // bind args
-void BRTInferenceExecutionFrame::BindArg(size_t idx, const void *ptr) {
+void BRTInferenceExecutionFrame::BindArg(size_t idx, const void *ptr,
+                                         BrtOwnershipType owership) {
   BRT_ENFORCE(idx >= info_.graph_info.weight_count);
   BRT_ENFORCE(idx < info_.graph_info.io_count + info_.graph_info.weight_count);
 
   int i = idx - info_.weights.size();
 
-  // if allocated, free it
-  if (ctx_.is_io_allocated[i]) {
-    ctx_.is_io_allocated[i] = false;
-    auto allocator = info_.weight_and_ios_allocators[idx];
-    allocator->Free(ctx_.weights_and_ios[idx]);
+  // buffer is alloc by brt's allocator
+  if (owership == BrtOwnershipType::OwnedByRuntime) {
+    BRT_ENFORCE(ptr != nullptr);
+    if (ctx_.is_io_allocated[i] && ctx_.weights_and_ios[idx] != ptr) {
+      auto allocator = info_.weight_and_ios_allocators[idx];
+      allocator->Free(ctx_.weights_and_ios[idx]);
+    }
+    ctx_.weights_and_ios[idx] = const_cast<void *>(ptr);
+    ctx_.is_io_allocated[i] = true;
+    return;
   }
 
-  ctx_.weights_and_ios[idx] = const_cast<void *>(ptr);
+  if (owership == BrtOwnershipType::CopiedByRuntime) {
+    uint64_t buffer_size = GetBytes(idx);
+    auto allocator = info_.weight_and_ios_allocators[idx];
+    BRT_ENFORCE(allocator != nullptr);
+    if (!ctx_.is_io_allocated[i]) {
+      ctx_.is_io_allocated[i] = true;
+      ctx_.weights_and_ios[idx] = allocator->Alloc(buffer_size);
+    }
+    void *brt_buffer_ptr = ctx_.weights_and_ios[idx];
+    const BrtMemoryInfo &info = allocator->Info();
+    CopyBufferData(info, const_cast<void *>(ptr), brt_buffer_ptr, buffer_size);
+  } else {
+    // if allocated, free it
+    if (ctx_.is_io_allocated[i]) {
+      ctx_.is_io_allocated[i] = false;
+      auto allocator = info_.weight_and_ios_allocators[idx];
+      allocator->Free(ctx_.weights_and_ios[idx]);
+    }
+    ctx_.weights_and_ios[idx] = const_cast<void *>(ptr);
+  }
 }
 
 void *BRTInferenceExecutionFrame::GetArg(size_t idx) {

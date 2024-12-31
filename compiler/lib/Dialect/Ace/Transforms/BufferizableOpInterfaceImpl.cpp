@@ -38,13 +38,12 @@ struct ConstOpInterface
 
     // Allocate outputs.
     auto output = constOp.getOutput();
-    auto tensorType = output.getType().cast<RankedTensorType>();
+    auto tensorType = cast<RankedTensorType>(output.getType());
     if (!tensorType)
       return failure();
     // don't dealloc constant, alawys mark as escaped
     FailureOr<Value> tensorAlloc = bufferization::allocateTensorForShapedValue(
-        rewriter, op->getLoc(), output,
-        /* escape */ true, options);
+        rewriter, op->getLoc(), output, options);
     if (failed(tensorAlloc))
       return failure();
     auto memrefType =
@@ -72,8 +71,8 @@ struct CustomCallOpInterface
     return false; // Arguments are read-only.
   }
 
-  bufferization::AliasingOpResultList
-  getAliasingOpResults(Operation *, OpOperand &, const AnalysisState &) const {
+  bufferization::AliasingValueList
+  getAliasingValues(Operation *, OpOperand &, const AnalysisState &) const {
     return {};
   }
 
@@ -84,7 +83,7 @@ struct CustomCallOpInterface
     // Bufferize arguments.
     SmallVector<Value> bufferArgs;
     for (OpOperand &operand : customCallOp->getOpOperands()) {
-      if (!operand.get().getType().isa<TensorType>())
+      if (!isa<TensorType>(operand.get().getType()))
         return failure();
       FailureOr<Value> operandBuffer =
           getBuffer(rewriter, operand.get(), options);
@@ -95,14 +94,13 @@ struct CustomCallOpInterface
 
     // Allocate outputs.
     for (OpResult result : customCallOp->getOpResults()) {
-      auto tensorType = result.getType().cast<RankedTensorType>();
+      auto tensorType = cast<RankedTensorType>(result.getType());
       if (!tensorType)
         return failure();
       AnalysisState analysisState(options);
       FailureOr<Value> tensorAlloc =
-          bufferization::allocateTensorForShapedValue(
-              rewriter, op->getLoc(), result,
-              analysisState.isTensorYielded(result), options);
+          bufferization::allocateTensorForShapedValue(rewriter, op->getLoc(),
+                                                      result, options);
       if (failed(tensorAlloc))
         return failure();
       auto memrefType =

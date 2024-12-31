@@ -16,8 +16,13 @@
 //===----------------------------------------------------------------------===//
 
 #include "byteir/Dialect/mhlo/Util/Util.h"
+#include "byteir/Dialect/mhlo/DynamicShapeOpRegister/Register.h"
+#include "byteir/Dialect/mhlo/Util/ShapeInferUtil.h"
 #include "byteir/Utils/Utils.h"
 #include "mhlo/IR/hlo_ops.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/IR/Matchers.h"
 #include "mlir/IR/Operation.h"
 
 using namespace llvm;
@@ -27,6 +32,8 @@ using namespace mlir::mhlo;
 #define K_INITIAL -999
 
 bool mlir::isMhlo(Operation *op) {
+  if (!op)
+    return false;
   Dialect *dialect = op->getDialect();
   return dialect && isa<MhloDialect>(dialect);
 }
@@ -49,11 +56,7 @@ bool mlir::isMhloConstantLike(Operation *op) {
 }
 
 bool mlir::isDeepMhloFoldable(Operation *op) {
-  auto check = [](Operation *op) {
-    if (!op)
-      return false;
-    return isMhlo(op);
-  };
+  auto check = [](Operation *op) { return isMhlo(op); };
   return deepCheck(op, check);
 }
 
@@ -65,7 +68,7 @@ bool mlir::isSplatMhloConstantValue(Operation *op, int64_t splat_val) {
   if (auto constOp = dyn_cast_or_null<mhlo::ConstantOp>(op)) {
     // only handle DenseIntElementsAttr for now
     // TODO: extend it
-    if (auto denseIntE = constOp.getValue().dyn_cast<DenseIntElementsAttr>()) {
+    if (auto denseIntE = dyn_cast<DenseIntElementsAttr>(constOp.getValue())) {
       return isSplatValue(denseIntE, splat_val);
     }
   }
@@ -76,7 +79,7 @@ bool mlir::isSplatMhloConstantValue(Operation *op, double splat_val) {
   if (auto constOp = dyn_cast_or_null<mhlo::ConstantOp>(op)) {
     // only handle DenseFPElementsAttr for now
     // TODO: extend it
-    if (auto denseFPE = constOp.getValue().dyn_cast<DenseFPElementsAttr>()) {
+    if (auto denseFPE = dyn_cast<DenseFPElementsAttr>(constOp.getValue())) {
       return isSplatValue(denseFPE, splat_val);
     }
   }
@@ -98,38 +101,91 @@ bool mlir::isSplatMhloConstantValue(Value val, double splat_val) {
   return isSplatMhloConstantValue(val.getDefiningOp(), splat_val);
 }
 
-namespace {
-
-byteir::NamedLayout
-parsePoolLayout(size_t rank, const SmallVector<int64_t> &window_dimensions,
-                const SmallVector<int64_t> &strides,
-                const SmallVector<int64_t> &padding) {
-  byteir::NamedLayout layout = byteir::NamedLayout::UNKNOWN;
-  if (window_dimensions[0] == 1 && window_dimensions[rank - 1] == 1 &&
-      strides[0] == 1 && strides[rank - 1] == 1 && padding[0] == 0 &&
-      padding[1] == 0 && padding[2 * rank - 2] == 0 &&
-      padding[2 * rank - 1] == 0) {
-    if (rank == 4) {
-      layout = byteir::NamedLayout::NHWC;
-    } else if (rank == 5) {
-      layout = byteir::NamedLayout::NDHWC;
-    }
-  } else if (window_dimensions[0] == 1 && window_dimensions[1] == 1 &&
-             strides[0] == 1 && strides[1] == 1 && padding[0] == 0 &&
-             padding[1] == 0 && padding[2] == 0 && padding[3] == 0) {
-    if (rank == 3) {
-      layout = byteir::NamedLayout::NCW;
-    } else if (rank == 4) {
-      layout = byteir::NamedLayout::NCHW;
-    } else if (rank == 5) {
-      layout = byteir::NamedLayout::NCDHW;
-    }
+// Return true if op is a regular reduce/reduce_window op, like reduce
+// max/min/sum/any
+template <typename RegionOp, typename Op> bool mlir::isRegularReduceOp(Op op) {
+  if (op.getInputs().size() != 1 || op.getInitValues().size() != 1 ||
+      op.getResults().size() != 1) {
+    return false;
   }
-  return layout;
+  if (!isBlockSingleOp<RegionOp>(&op.getBody().front())) {
+    return false;
+  }
+
+  SplatElementsAttr initValue;
+  if (!matchPattern(op.getInitValues()[0], m_Constant(&initValue))) {
+    return false;
+  }
+
+  if (std::is_same_v<RegionOp, mhlo::AddOp> && isZeroAttribute(initValue)) {
+    return true;
+  } else if (std::is_same_v<RegionOp, mhlo::MaxOp> &&
+             isMinValueAttribute(initValue)) {
+    return true;
+  } else if (std::is_same_v<RegionOp, mhlo::MinOp> &&
+             isMaxValueAttribute(initValue)) {
+    return true;
+  } else if (std::is_same_v<RegionOp, mhlo::OrOp> &&
+             isZeroAttribute(initValue)) {
+    return true;
+  } else if (std::is_same_v<RegionOp, mhlo::MulOp> &&
+             isSplatElementsAttribute(cast<DenseIntOrFPElementsAttr>(initValue),
+                                      1, 1.0)) {
+    return true;
+  } else {
+    return false;
+  }
 }
 
-} // namespace
+// note: if want to add more instance, need to confirm it is a regular
+// reduce/reduce_window.
+template bool
+    mlir::isRegularReduceOp<mhlo::AddOp, mhlo::ReduceOp>(mhlo::ReduceOp);
+template bool
+    mlir::isRegularReduceOp<mhlo::MaxOp, mhlo::ReduceOp>(mhlo::ReduceOp);
+template bool
+    mlir::isRegularReduceOp<mhlo::MinOp, mhlo::ReduceOp>(mhlo::ReduceOp);
+template bool
+    mlir::isRegularReduceOp<mhlo::OrOp, mhlo::ReduceOp>(mhlo::ReduceOp);
+template bool
+    mlir::isRegularReduceOp<mhlo::MulOp, mhlo::ReduceOp>(mhlo::ReduceOp);
+template bool mlir::isRegularReduceOp<mhlo::AddOp, mhlo::ReduceWindowOp>(
+    mhlo::ReduceWindowOp);
+template bool mlir::isRegularReduceOp<mhlo::MaxOp, mhlo::ReduceWindowOp>(
+    mhlo::ReduceWindowOp);
 
+// Return true if slice region is continuous
+bool mlir::isSliceContinuousSubview(mhlo::SliceOp op) {
+  auto operandType = cast<RankedTensorType>(op.getOperand().getType());
+  auto resultType = cast<RankedTensorType>(op.getType());
+  if (!operandType.hasStaticShape() || !resultType.hasStaticShape()) {
+    return false;
+  }
+  if (!isSplatValue(op.getStrides(), 1)) {
+    return false;
+  }
+
+  // find highest non one dimension
+  std::optional<int64_t> leadingNonOneDimensionIndex;
+  for (int64_t i = 0; i < resultType.getRank(); i++) {
+    if (resultType.getDimSize(i) != 1) {
+      leadingNonOneDimensionIndex = i;
+      break;
+    }
+  }
+  if (!leadingNonOneDimensionIndex.has_value()) {
+    return true;
+  }
+
+  for (int64_t i = leadingNonOneDimensionIndex.value() + 1;
+       i < resultType.getRank(); i++) {
+    if (operandType.getDimSize(i) != resultType.getDimSize(i))
+      return false;
+  }
+  return true;
+}
+
+// return cumsum's index, return nullopt if not a cumsum op
 std::optional<int64_t> mlir::getCumsumIndex(mhlo::ReduceWindowOp op) {
   auto base_dilations = op.getBaseDilationsAttr();
   if (base_dilations && !isSplatValue(base_dilations, 1)) {
@@ -154,11 +210,11 @@ std::optional<int64_t> mlir::getCumsumIndex(mhlo::ReduceWindowOp op) {
       SmallVector<int64_t>(op.getPaddingAttr().getValues<int64_t>().begin(),
                            op.getPaddingAttr().getValues<int64_t>().end());
 
-  auto inputShape = op.getInputs()[0].getType().cast<ShapedType>();
+  auto inputShape = cast<ShapedType>(op.getInputs()[0].getType());
   if (!inputShape.hasRank()) {
     return std::nullopt;
   }
-  int64_t index = K_INITIAL;
+  std::optional<int64_t> index;
   for (int64_t i = 0; i < inputShape.getRank(); i++) {
     if (window_dimensions[i] == 1 && padding[i * 2] == 0 &&
         padding[i * 2 + 1] == 0) {
@@ -170,7 +226,7 @@ std::optional<int64_t> mlir::getCumsumIndex(mhlo::ReduceWindowOp op) {
     } else if (window_dimensions[i] == inputShape.getDimSize(i) &&
                padding[i * 2] == inputShape.getDimSize(i) - 1 &&
                padding[i * 2 + 1] == 0) {
-      if (index == K_INITIAL) {
+      if (!index.has_value()) {
         index = i;
       } else {
         // more than one dim to be cumsumed
@@ -249,10 +305,38 @@ template <typename OpTy> bool mlir::isValidPoolOrPoolGradLayout(OpTy op) {
   return true;
 }
 
-namespace mlir {
-template bool isValidPoolOrPoolGradLayout(mhlo::ReduceWindowOp);
-template bool isValidPoolOrPoolGradLayout(mhlo::SelectAndScatterOp);
-} // namespace mlir
+template bool mlir::isValidPoolOrPoolGradLayout(mhlo::ReduceWindowOp);
+template bool mlir::isValidPoolOrPoolGradLayout(mhlo::SelectAndScatterOp);
+
+namespace {
+byteir::NamedLayout
+parsePoolLayout(size_t rank, const SmallVector<int64_t> &window_dimensions,
+                const SmallVector<int64_t> &strides,
+                const SmallVector<int64_t> &padding) {
+  byteir::NamedLayout layout = byteir::NamedLayout::UNKNOWN;
+  if (window_dimensions[0] == 1 && window_dimensions[rank - 1] == 1 &&
+      strides[0] == 1 && strides[rank - 1] == 1 && padding[0] == 0 &&
+      padding[1] == 0 && padding[2 * rank - 2] == 0 &&
+      padding[2 * rank - 1] == 0) {
+    if (rank == 4) {
+      layout = byteir::NamedLayout::NHWC;
+    } else if (rank == 5) {
+      layout = byteir::NamedLayout::NDHWC;
+    }
+  } else if (window_dimensions[0] == 1 && window_dimensions[1] == 1 &&
+             strides[0] == 1 && strides[1] == 1 && padding[0] == 0 &&
+             padding[1] == 0 && padding[2] == 0 && padding[3] == 0) {
+    if (rank == 3) {
+      layout = byteir::NamedLayout::NCW;
+    } else if (rank == 4) {
+      layout = byteir::NamedLayout::NCHW;
+    } else if (rank == 5) {
+      layout = byteir::NamedLayout::NCDHW;
+    }
+  }
+  return layout;
+}
+} // namespace
 
 byteir::NamedLayout mlir::getPoolLayout(mlir::mhlo::ReduceWindowOp op) {
   if (!mlir::isValidPoolOrPoolGradLayout(op)) {
@@ -544,10 +628,10 @@ mlir::createBroadcastedDenseElementsAttr(DenseElementsAttr originAttr,
     newBroadcastDims = llvm::to_vector(broadcastDims);
   }
 
-  if (valueType.getElementType().isa<FloatType>()) {
+  if (isa<FloatType>(valueType.getElementType())) {
     return createBroadcastedDenseElementsAttrImpl<APFloat>(originAttr, newType,
                                                            newBroadcastDims);
-  } else if (valueType.getElementType().isa<IntegerType>()) {
+  } else if (isa<IntegerType>(valueType.getElementType())) {
     return createBroadcastedDenseElementsAttrImpl<APInt>(originAttr, newType,
                                                          newBroadcastDims);
   }
@@ -603,11 +687,11 @@ mlir::computeReshapeInputOutputRankMapIndex(ShapedType inputType,
 // compute the index of the reshape's expand dimension
 std::optional<int64_t>
 mlir::computeReshapeExpandDim(mhlo::ReshapeOp reshapeOp) {
-  auto reshapeOperandType = reshapeOp.getOperand().getType().cast<ShapedType>();
+  auto reshapeOperandType = cast<ShapedType>(reshapeOp.getOperand().getType());
   if (!reshapeOperandType.hasStaticShape()) {
     return std::nullopt;
   }
-  auto reshapeResultType = reshapeOp.getResult().getType().cast<ShapedType>();
+  auto reshapeResultType = cast<ShapedType>(reshapeOp.getResult().getType());
 
   auto maybeIndex = computeReshapeInputOutputRankMapIndex(reshapeOperandType,
                                                           reshapeResultType);
@@ -623,4 +707,52 @@ mlir::computeReshapeExpandDim(mhlo::ReshapeOp reshapeOp) {
     }
   }
   return reshapeOperandType.getRank();
+}
+
+FailureOr<SmallVector<Value>>
+mlir::createEmptyTensorForOpResult(OpBuilder &builder, Operation *op) {
+  SmallVector<Value> emptyTensors;
+  bool resultsHasDynamicShape = false;
+  for (auto &&result : op->getResults()) {
+    if (auto resType = dyn_cast<ShapedType>(result.getType())) {
+      if (resType.hasStaticShape()) {
+        auto emptyOp = builder.create<tensor::EmptyOp>(
+            op->getLoc(), resType.getShape(), resType.getElementType());
+        emptyTensors.emplace_back(emptyOp);
+      } else {
+        resultsHasDynamicShape = true;
+        break;
+      }
+    }
+  }
+
+  if (resultsHasDynamicShape) {
+    emptyTensors.clear();
+    registerAllMhloReifyReturnTypeShapes();
+    SmallVector<Value, 1> reifications;
+
+    if (reifyShapes(builder, op, reifications).failed()) {
+      return failure();
+    }
+
+    for (auto &&resultAndShape : llvm::zip(op->getResults(), reifications)) {
+      SmallVector<Value, 1> dynamicSizes;
+      auto resType = cast<ShapedType>(std::get<0>(resultAndShape).getType());
+      for (int64_t i = 0; i < resType.getRank(); ++i) {
+        if (resType.isDynamicDim(i)) {
+          auto dim = builder
+                         .create<tensor::ExtractOp>(
+                             op->getLoc(), std::get<1>(resultAndShape),
+                             ValueRange{builder.create<arith::ConstantIndexOp>(
+                                 op->getLoc(), static_cast<int64_t>(i))})
+                         .getResult();
+          dynamicSizes.emplace_back(dim);
+        }
+      }
+      auto emptyOp =
+          builder.create<tensor::EmptyOp>(op->getLoc(), resType, dynamicSizes);
+      emptyTensors.emplace_back(emptyOp);
+    }
+  }
+  return emptyTensors;
 }

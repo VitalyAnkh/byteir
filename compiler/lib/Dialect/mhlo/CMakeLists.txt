@@ -1,4 +1,4 @@
-add_mlir_dialect_library(ByteIRMhloUtils
+add_byteir_dialect_library(ByteIRMhloUtils
   Util/FusionUtil.cpp
   Util/ShapeInferUtil.cpp
   Util/Util.cpp
@@ -17,10 +17,10 @@ add_mlir_dialect_library(ByteIRMhloUtils
   MLIRSupport
   ByteIRAnalysis
   ByteIRUtils
-  )
+)
 
 
-add_mlir_dialect_library(ByteIRMhloDynamicShapeOpRegister
+add_byteir_dialect_library(ByteIRMhloDynamicShapeOpRegister
   DynamicShapeOpRegister/Concatenate.cpp
   DynamicShapeOpRegister/Convolution.cpp
   DynamicShapeOpRegister/DotLike.cpp 
@@ -33,11 +33,15 @@ add_mlir_dialect_library(ByteIRMhloDynamicShapeOpRegister
   DynamicShapeOpRegister/Reduce.cpp
   DynamicShapeOpRegister/ReshapeLike.cpp
   DynamicShapeOpRegister/Softmax.cpp
+  DynamicShapeOpRegister/AddN.cpp
+  DynamicShapeOpRegister/OneHot.cpp
   DynamicShapeOpRegister/TorchIndexSelect.cpp
-  DynamicShapeOpRegister/Where.cpp
+  DynamicShapeOpRegister/ScatterNd.cpp
   DynamicShapeOpRegister/StridedSlice.cpp
+  DynamicShapeOpRegister/BatchMatMul.cpp
   DynamicShapeOpRegister/Repeat.cpp
   DynamicShapeOpRegister/GeLU.cpp
+  DynamicShapeOpRegister/LayerNorm.cpp
 
   ADDITIONAL_HEADER_DIRS
   ${BYTEIR_SRC_INCLUDE_DIR}/byteir/Dialect/mhlo/DynamicShapeOpRegister
@@ -54,7 +58,7 @@ add_mlir_dialect_library(ByteIRMhloDynamicShapeOpRegister
   ByteIRUtils
 )
 
-add_mlir_dialect_library(ByteIRMhloAnalysis
+add_byteir_dialect_library(ByteIRMhloAnalysis
   Analysis/DimFromBroadcast.cpp
   Analysis/ShapeAnalysis.cpp
 
@@ -72,17 +76,17 @@ add_mlir_dialect_library(ByteIRMhloAnalysis
   MhloDialect
 )
 
-add_mlir_dialect_library(ByteIRMhloPasses
+add_byteir_dialect_library(ByteIRMhloPasses
   Transforms/BoundedShapeInference.cpp
   Transforms/CanonicalizeExt.cpp
-  Transforms/CatFusion.cpp
   Transforms/ClusterConstraint.cpp
   Transforms/ConvBackwardFusion.cpp
   Transforms/ConvForwardFusion.cpp
   Transforms/ConvertFuncToCustomCall.cpp
   Transforms/ConvertOpToCustomCall.cpp
   Transforms/ConvertInsertion.cpp
-  Transforms/DotTransposeFusion.cpp
+  Transforms/FuseTransposeIntoDotGeneral.cpp
+  Transforms/DecomposeMhloCustomCallOps.cpp
   Transforms/DTypeConversion.cpp
   Transforms/DynamicShapeClustering.cpp
   Transforms/FuncArgRearrangement.cpp
@@ -90,16 +94,14 @@ add_mlir_dialect_library(ByteIRMhloPasses
   Transforms/FusionOutlining.cpp
   Transforms/MatmulLayoutTransform.cpp
   Transforms/GenericFusion.cpp
-  Transforms/HloAggressiveFusion.cpp
   Transforms/HloFolder.cpp
   Transforms/HloMoveDown.cpp
   Transforms/HloMoveUp.cpp
-  Transforms/HloTransposeDotToDotGeneral.cpp
+  Transforms/HloSimplify.cpp
   Transforms/InsertShapeConstraint.cpp
   Transforms/IOConvertFusion.cpp
   Transforms/LayoutTransformation.cpp
-  Transforms/ReduceFusion.cpp
-  Transforms/ReshapeGather.cpp
+  Transforms/ReduceWindowFusion.cpp
   Transforms/RewriteWithConstraint.cpp
   Transforms/ShapeReification.cpp
   Transforms/StaticShapeInference.cpp
@@ -115,15 +117,18 @@ add_mlir_dialect_library(ByteIRMhloPasses
   ByteIRMhloPassIncGen
   ByteIRAnalysis
   MhloDialect
+  MLIRSCFDialect
   ByteIRMhloUtils
   ByteIRUtils
   ByteIRMhloAnalysis
   ByteIRMhloDynamicShapeOpRegister
   MLIRAceDialect
+  MLIRCatDialect
 
   LINK_LIBS PUBLIC
   MLIRIR
   MhloDialect
+  MLIRSCFDialect
   MLIRMhloUtils
   MLIRSideEffectInterfaces
   MLIRSupport
@@ -134,4 +139,4 @@ add_mlir_dialect_library(ByteIRMhloPasses
   ByteIRMhloDynamicShapeOpRegister
   MLIRAceDialect
   MLIRQuantDialect # FIXME: this should link at MhloDialect
-  )
+)

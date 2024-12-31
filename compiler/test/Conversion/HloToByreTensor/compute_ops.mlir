@@ -1,11 +1,29 @@
 // RUN: byteir-opt -hlo-to-byre-tensor --canonicalize --split-input-file %s | FileCheck %s
+// RUN: byteir-opt -hlo-to-byre-tensor="enable-tf32" --canonicalize --split-input-file %s | FileCheck %s --check-prefix TF32
 
 func.func @test_transpose(%arg0: tensor<2x2xf32>) -> tensor<2x2xf32> attributes {__placeholder__byre.entry_point} {
   %0 = "mhlo.transpose"(%arg0) {permutation = dense<[1, 0]> : tensor<2xi64>} : (tensor<2x2xf32>) -> tensor<2x2xf32>
   return %0 : tensor<2x2xf32>
 }
 // CHECK-LABEL: func.func @test_transpose
-//   CHECK: byre.compute @TransposeOp
+// CHECK-NEXT: %0 = tensor.empty() : tensor<2x2xf32>
+// CHECK-NEXT: byre.compute_on_tensor @TransposeOp
+
+// -----
+
+func.func @test_dynamic_transpose(%arg0: tensor<?x?xf32>) -> tensor<?x?xf32> attributes {__placeholder__byre.entry_point} {
+  %0 = "mhlo.transpose"(%arg0) {permutation = dense<[1, 0]> : tensor<2xi64>} : (tensor<?x?xf32>) -> tensor<?x?xf32>
+  return %0 : tensor<?x?xf32>
+}
+// CHECK-LABEL: func.func @test_dynamic_transpose
+// CHECK-NEXT: %[[C1:.*]] = arith.constant 1 : index
+// CHECK-NEXT: %[[C0:.*]] = arith.constant 0 : index
+// CHECK-NEXT: %[[DIM:.*]] = tensor.dim %arg0, %[[C0]] : tensor<?x?xf32>
+// CHECK-NEXT: %[[DIM0:.*]] = tensor.dim %arg0, %[[C1]] : tensor<?x?xf32>
+// CHECK-NEXT: %[[V0:.*]] = tensor.empty(%[[DIM0]], %[[DIM]]) : tensor<?x?xf32>
+// CHECK-NEXT: %[[V1:.*]] = byre.compute_on_tensor @TransposeOp
+// CHECK-SAME: ins(%arg0 : tensor<?x?xf32>) outs(%[[V0]] : tensor<?x?xf32>) : tensor<?x?xf32>
+
 
 // -----
 
@@ -14,7 +32,8 @@ func.func @test_ace_custom_call(%arg0: tensor<!ace.string>, %arg1 : tensor<!ace.
   return %0 : tensor<i1>
 }
 // CHECK-LABEL: func.func @test_ace_custom_call
-//   CHECK: byre.compute @tf.Equal
+// CHECK-NEXT: tensor.empty() : tensor<i1>
+// CHECK-NEXT: byre.compute_on_tensor @tf.Equal
 
 // -----
 
@@ -23,8 +42,26 @@ func.func @test_mhlo_custom_call(%arg0: tensor<4xf32>) -> tensor<4xf32> attribut
   return %0 : tensor<4xf32>
 }
 // CHECK-LABEL: func.func @test_mhlo_custom_call
-//   CHECK: byre.compute @byteir.gelu
+// CHECK-NEXT: tensor.empty() : tensor<4xf32>
+// CHECK-NEXT: byre.compute_on_tensor @byteir.gelu
 //   CHECK-SAME: approximate = "erf"
+
+
+// -----
+
+func.func @test_dynamic_mhlo_custom_call(%arg0: tensor<?xf32>) -> tensor<?xf32> attributes {__placeholder__byre.entry_point} {
+  %0 = "mhlo.custom_call"(%arg0) {api_version = 1 : i32, backend_config = "", byteir_attrs = {approximate = "erf"}, call_target_name = "byteir.gelu", called_computations = [], has_side_effect = false} : (tensor<?xf32>) -> tensor<?xf32>
+  return %0 : tensor<?xf32>
+}
+
+// CHECK-LABEL: func.func @test_dynamic_mhlo_custom_call
+// CHECK-NEXT: %[[C0:.*]] = arith.constant 0 : index
+// CHECK-NEXT: %[[DIM:.*]] = tensor.dim %arg0, %[[C0]] : tensor<?xf32>
+// CHECK-NEXT: %[[V0:.*]] = tensor.empty(%[[DIM]]) : tensor<?xf32>
+// CHECK-NEXT: %[[V1:.*]] = byre.compute_on_tensor @byteir.gelu
+// CHECK-SAME: {approximate = "erf"} ins(%arg0 : tensor<?xf32>)
+// CHECK-SAME: outs(%[[V0]] : tensor<?xf32>) : tensor<?xf32>
+
 
 // -----
 
@@ -93,9 +130,23 @@ func.func @test_mhlo_dot(%arg0: tensor<128x64xf32>, %arg1: tensor<64x32xf32>) ->
   return %0 : tensor<128x32xf32>
 }
 // CHECK-LABEL:   func.func @test_mhlo_dot
-// CHECK:     byre.compute @MatmulOp
+// CHECK-NEXT: tensor.empty() : tensor<128x32xf32>
+// CHECK-NEXT:     byre.compute_on_tensor @MatmulOp
 //   CHECK-DAG: lhs_contracting_dimension = 1 : i64
 //   CHECK-DAG: rhs_contracting_dimension = 0 : i64
+
+// -----
+
+func.func @test_dynamic_mhlo_dot(%arg0: tensor<?x64xf32>, %arg1: tensor<64x32xf32>) -> tensor<?x32xf32> attributes {__placeholder__byre.entry_point} {
+  %0 = "mhlo.dot"(%arg0, %arg1) : (tensor<?x64xf32>, tensor<64x32xf32>) -> tensor<?x32xf32>
+  return %0 : tensor<?x32xf32>
+}
+// CHECK-LABEL:   func.func @test_dynamic_mhlo_dot
+// CHECK-NEXT: %[[C0:.*]] = arith.constant 0 : index
+// CHECK-NEXT: %[[DIM:.*]] = tensor.dim %arg0, %[[C0]] : tensor<?x64xf32>
+// CHECK-NEXT: %[[V0:.*]] = tensor.empty(%[[DIM]]) : tensor<?x32xf32>
+// CHECK-NEXT: %[[V1:.*]] = byre.compute_on_tensor @MatmulOp {lhs_contracting_dimension = 1 : i64, rhs_contracting_dimension = 0 : i64}
+// CHECK-SAME: ins(%arg0, %arg1 : tensor<?x64xf32>, tensor<64x32xf32>) outs(%[[V0]] : tensor<?x32xf32>) : tensor<?x32xf32>
 
 // -----
 
@@ -104,9 +155,35 @@ func.func @test_mhlo_dot_general_0(%arg0: tensor<128x64xf32>, %arg1: tensor<64x3
   return %0 : tensor<128x32xf32>
 }
 // CHECK-LABEL:   func.func @test_mhlo_dot_general_0
-// CHECK:     byre.compute @MatmulOp
+// CHECK:     byre.compute_on_tensor @MatmulOp
 //   CHECK-DAG: lhs_contracting_dimension = 1 : i64
 //   CHECK-DAG: rhs_contracting_dimension = 0 : i64
+
+// TF32-LABEL:   func.func @test_mhlo_dot_general_0
+// TF32:     byre.compute_on_tensor @MatmulOp
+//   TF32-DAG: lhs_contracting_dimension = 1 : i64
+//   TF32-DAG: rhs_contracting_dimension = 0 : i64
+//   TF32-DAG: compute_type = tf32
+
+// -----
+
+func.func @test_dynamic_mhlo_dot_general_0(%arg0: tensor<?x64xf32>, %arg1: tensor<64x32xf32>) -> tensor<?x32xf32> attributes {__placeholder__byre.entry_point} {
+  %0 = "mhlo.dot_general"(%arg0, %arg1) {dot_dimension_numbers = #mhlo.dot<lhs_contracting_dimensions = [1], rhs_contracting_dimensions = [0]>} : (tensor<?x64xf32>, tensor<64x32xf32>) -> tensor<?x32xf32>
+  return %0 : tensor<?x32xf32>
+}
+// CHECK-LABEL: func.func @test_dynamic_mhlo_dot_general_0
+// CHECK-NEXT: %[[C0:.*]] = arith.constant 0 : index
+// CHECK-NEXT: %[[DIM:.*]] = tensor.dim %arg0, %[[C0]] : tensor<?x64xf32>
+// CHECK-NEXT: %[[V0:.*]] = tensor.empty(%[[DIM]]) : tensor<?x32xf32>
+// CHECK-NEXT: %[[V1:.*]] = byre.compute_on_tensor @MatmulOp {lhs_contracting_dimension = 1 : i64, rhs_contracting_dimension = 0 : i64}
+// CHECK-SAME: ins(%arg0, %arg1 : tensor<?x64xf32>, tensor<64x32xf32>) outs(%[[V0]] : tensor<?x32xf32>) : tensor<?x32xf32>
+
+// TF32-LABEL: func.func @test_dynamic_mhlo_dot_general_0
+// TF32-NEXT: %[[C0:.*]] = arith.constant 0 : index
+// TF32-NEXT: %[[DIM:.*]] = tensor.dim %arg0, %[[C0]] : tensor<?x64xf32>
+// TF32-NEXT: %[[V0:.*]] = tensor.empty(%[[DIM]]) : tensor<?x32xf32>
+// TF32-NEXT: %[[V1:.*]] = byre.compute_on_tensor @MatmulOp {compute_type = tf32, lhs_contracting_dimension = 1 : i64, rhs_contracting_dimension = 0 : i64}
+// TF32-SAME: ins(%arg0, %arg1 : tensor<?x64xf32>, tensor<64x32xf32>) outs(%[[V0]] : tensor<?x32xf32>) : tensor<?x32xf32>
 
 // -----
 
@@ -115,9 +192,37 @@ func.func @test_mhlo_dot_general_1(%arg0: tensor<128x64xf32>, %arg1: tensor<64x3
   return %0 : tensor<128x32xf32>
 }
 // CHECK-LABEL:   func.func @test_mhlo_dot_general_1
-// CHECK:     byre.compute @MatmulOp
+// CHECK:     byre.compute_on_tensor @MatmulOp
 //   CHECK-DAG: lhs_contracting_dimension = 1 : i64
 //   CHECK-DAG: rhs_contracting_dimension = 0 : i64
+
+// TF32-LABEL:   func.func @test_mhlo_dot_general_1
+// TF32:     byre.compute_on_tensor @MatmulOp
+//   TF32-DAG: lhs_contracting_dimension = 1 : i64
+//   TF32-DAG: rhs_contracting_dimension = 0 : i64
+//   TF32-DAG: compute_type = tf32
+
+// -----
+
+func.func @test_dynamic_mhlo_dot_general_1(%arg0: tensor<?x64xf32>, %arg1: tensor<64x32xf32>) -> tensor<?x32xf32> attributes {__placeholder__byre.entry_point} {
+  %0 = "mhlo.dot_general"(%arg0, %arg1) {dot_dimension_numbers = #mhlo.dot<lhs_batching_dimensions = [], rhs_batching_dimensions = [], lhs_contracting_dimensions = [1], rhs_contracting_dimensions = [0]>} : (tensor<?x64xf32>, tensor<64x32xf32>) -> tensor<?x32xf32>
+  return %0 : tensor<?x32xf32>
+}
+// CHECK-LABEL: func.func @test_dynamic_mhlo_dot_general_1
+// CHECK-NEXT: %[[C0:.*]] = arith.constant 0 : index
+// CHECK-NEXT: %[[DIM:.*]] = tensor.dim %arg0, %[[C0]] : tensor<?x64xf32>
+// CHECK-NEXT: %[[V0:.*]] = tensor.empty(%[[DIM]]) : tensor<?x32xf32>
+// CHECK-NEXT: %[[V1:.*]] = byre.compute_on_tensor @MatmulOp
+// CHECK-SAME: {lhs_contracting_dimension = 1 : i64, rhs_contracting_dimension = 0 : i64}
+// CHECK-SAME: ins(%arg0, %arg1 : tensor<?x64xf32>, tensor<64x32xf32>) outs(%[[V0]] : tensor<?x32xf32>) : tensor<?x32xf32>
+
+// TF32-LABEL: func.func @test_dynamic_mhlo_dot_general_1
+// TF32-NEXT: %[[C0:.*]] = arith.constant 0 : index
+// TF32-NEXT: %[[DIM:.*]] = tensor.dim %arg0, %[[C0]] : tensor<?x64xf32>
+// TF32-NEXT: %[[V0:.*]] = tensor.empty(%[[DIM]]) : tensor<?x32xf32>
+// TF32-NEXT: %[[V1:.*]] = byre.compute_on_tensor @MatmulOp
+// TF32-SAME: {compute_type = tf32, lhs_contracting_dimension = 1 : i64, rhs_contracting_dimension = 0 : i64}
+// TF32-SAME: ins(%arg0, %arg1 : tensor<?x64xf32>, tensor<64x32xf32>) outs(%[[V0]] : tensor<?x32xf32>) : tensor<?x32xf32>
 
 // -----
 
@@ -126,11 +231,57 @@ func.func @test_mhlo_dot_general_2(%arg0: tensor<3x128x64xf32>, %arg1: tensor<3x
   return %0 : tensor<3x128x32xf32>
 }
 // CHECK-LABEL:   func.func @test_mhlo_dot_general_2
-// CHECK:     byre.compute @BatchMatmulOp
+// CHECK:     byre.compute_on_tensor @BatchMatmulOp
 //   CHECK-DAG: lhs_batching_dimensions = [0]
 //   CHECK-DAG: rhs_batching_dimensions = [0]
 //   CHECK-DAG: lhs_contracting_dimension = 2 : i64
 //   CHECK-DAG: rhs_contracting_dimension = 1 : i64
+
+// TF32-LABEL:   func.func @test_mhlo_dot_general_2
+// TF32:     byre.compute_on_tensor @BatchMatmulOp
+//   TF32-DAG: lhs_batching_dimensions = [0]
+//   TF32-DAG: rhs_batching_dimensions = [0]
+//   TF32-DAG: lhs_contracting_dimension = 2 : i64
+//   TF32-DAG: rhs_contracting_dimension = 1 : i64
+//   TF32-DAG: compute_type = tf32
+
+// -----
+
+func.func @test_dynamic_mhlo_dot_general_2(%arg0: tensor<?x128x64xf32>, %arg1: tensor<?x64x32xf32>) -> tensor<?x128x32xf32> attributes {__placeholder__byre.entry_point} {
+  %0 = "mhlo.dot_general"(%arg0, %arg1) {dot_dimension_numbers = #mhlo.dot<lhs_batching_dimensions = [0], rhs_batching_dimensions = [0], lhs_contracting_dimensions = [2], rhs_contracting_dimensions = [1]>} : (tensor<?x128x64xf32>, tensor<?x64x32xf32>) -> tensor<?x128x32xf32>
+  return %0 : tensor<?x128x32xf32>
+}
+// CHECK-LABEL: func.func @test_dynamic_mhlo_dot_general_2
+// CHECK-NEXT: %[[C0:.*]] = arith.constant 0 : index
+// CHECK-NEXT: %[[DIM:.*]] = tensor.dim %arg0, %[[C0]] : tensor<?x128x64xf32>
+// CHECK-NEXT: %[[V0:.*]] = tensor.empty(%[[DIM]]) : tensor<?x128x32xf32>
+// CHECK-NEXT: %[[V1:.*]] = byre.compute_on_tensor @BatchMatmulOp
+// CHECK-SAME: {lhs_batching_dimensions = [0], lhs_contracting_dimension = 2 : i64, rhs_batching_dimensions = [0], rhs_contracting_dimension = 1 : i64}
+// CHECK-SAME: ins(%arg0, %arg1 : tensor<?x128x64xf32>, tensor<?x64x32xf32>) outs(%[[V0]] : tensor<?x128x32xf32>) : tensor<?x128x32xf32>
+
+// TF32-LABEL: func.func @test_dynamic_mhlo_dot_general_2
+// TF32-NEXT: %[[C0:.*]] = arith.constant 0 : index
+// TF32-NEXT: %[[DIM:.*]] = tensor.dim %arg0, %[[C0]] : tensor<?x128x64xf32>
+// TF32-NEXT: %[[V0:.*]] = tensor.empty(%[[DIM]]) : tensor<?x128x32xf32>
+// TF32-NEXT: %[[V1:.*]] = byre.compute_on_tensor @BatchMatmulOp
+// TF32-SAME: {compute_type = tf32, lhs_batching_dimensions = [0], lhs_contracting_dimension = 2 : i64, rhs_batching_dimensions = [0], rhs_contracting_dimension = 1 : i64}
+// TF32-SAME: ins(%arg0, %arg1 : tensor<?x128x64xf32>, tensor<?x64x32xf32>) outs(%[[V0]] : tensor<?x128x32xf32>) : tensor<?x128x32xf32>
+
+// -----
+
+func.func @test_dynamic_mhlo_dot_general_3(%arg0: tensor<?x?x64xf32>, %arg1: tensor<?x64x32xf32>) -> tensor<?x?x32xf32> attributes {__placeholder__byre.entry_point} {
+  %0 = "mhlo.dot_general"(%arg0, %arg1) {dot_dimension_numbers = #mhlo.dot<lhs_batching_dimensions = [0], rhs_batching_dimensions = [0], lhs_contracting_dimensions = [2], rhs_contracting_dimensions = [1]>} : (tensor<?x?x64xf32>, tensor<?x64x32xf32>) -> tensor<?x?x32xf32>
+  return %0 : tensor<?x?x32xf32>
+}
+// CHECK-LABEL: func.func @test_dynamic_mhlo_dot_general_3
+// CHECK-NEXT: %[[C1:.*]] = arith.constant 1 : index
+// CHECK-NEXT: %[[C0:.*]] = arith.constant 0 : index
+// CHECK-NEXT: %[[DIM:.*]] = tensor.dim %arg0, %c0 : tensor<?x?x64xf32>
+// CHECK-NEXT: %[[DIM0:.*]] = tensor.dim %arg0, %c1 : tensor<?x?x64xf32>
+// CHECK-NEXT: %[[V0:.*]] = tensor.empty(%[[DIM]], %[[DIM0]]) : tensor<?x?x32xf32>
+// CHECK-NEXT: %[[V1:.*]] = byre.compute_on_tensor @BatchMatmulOp
+// CHECK-SAME: {lhs_batching_dimensions = [0], lhs_contracting_dimension = 2 : i64, rhs_batching_dimensions = [0], rhs_contracting_dimension = 1 : i64}
+// CHECK-SAME: ins(%arg0, %arg1 : tensor<?x?x64xf32>, tensor<?x64x32xf32>) outs(%[[V0]] : tensor<?x?x32xf32>) : tensor<?x?x32xf32>
 
 // -----
 
@@ -139,7 +290,7 @@ func.func @test_mhlo_conv(%arg0: tensor<1x64x56x56xf16>, %arg1: tensor<64x64x3x3
   return %0 : tensor<1x64x56x56xf16>
 }
 // CHECK-LABEL:   func.func @test_mhlo_conv
-// CHECK:     byre.compute @ConvOp
+// CHECK:     byre.compute_on_tensor @ConvOp
 //   CHECK-DAG: batch_group_count = 1 : i64
 //   CHECK-DAG: feature_group_count = 1 : i64
 //   CHECK-DAG: input_layout = "NCHW"
@@ -162,8 +313,28 @@ func.func @test_mhlo_reduce_sum(%arg0: tensor<1x128x128xf32>) -> tensor<128xf32>
   return %1 : tensor<128xf32>
 }
 // CHECK-LABEL: func.func @test_mhlo_reduce_sum
-// CHECK-NEXT: byre.compute @ReduceSumOp(%arg0)
+// CHECK-NEXT: tensor.empty() : tensor<128xf32>
+// CHECK-NEXT: byre.compute_on_tensor @ReduceSumOp
 //   CHECK-DAG: dimensions = dense<[0, 1]>
+
+// -----
+
+func.func @test_dynamic_mhlo_reduce_sum(%arg0: tensor<1x128x?xf32>) -> tensor<?xf32> attributes {__placeholder__byre.entry_point} {
+  %0 = mhlo.constant dense<0.000000e+00> : tensor<f32>
+  %1 = "mhlo.reduce"(%arg0, %0) ({
+  ^bb0(%arg1: tensor<f32>, %arg2: tensor<f32>):
+    %2 = mhlo.add %arg1, %arg2 : (tensor<f32>, tensor<f32>) -> tensor<f32>
+    mhlo.return %2 : tensor<f32>
+  }) {dimensions = dense<[0, 1]> : tensor<2xi64>} : (tensor<1x128x?xf32>, tensor<f32>) -> tensor<?xf32>
+  return %1 : tensor<?xf32>
+}
+// CHECK-LABEL: func.func @test_dynamic_mhlo_reduce_sum
+// CHECK-NEXT: %[[C2:.*]] = arith.constant 2 : index
+// CHECK-NEXT: %[[DIM:.*]] = tensor.dim %arg0, %[[C2]] : tensor<1x128x?xf32>
+// CHECK-NEXT: %[[V0:.*]] = tensor.empty(%dim) : tensor<?xf32>
+// CHECK-NEXT: %[[V1:.*]] = byre.compute_on_tensor @ReduceSumOp
+// CHECK-SAME: {dimensions = dense<[0, 1]> : tensor<2xi64>}
+// CHECK-SAME: ins(%arg0 : tensor<1x128x?xf32>) outs(%[[V0]] : tensor<?xf32>) : tensor<?xf32>
 
 // -----
 
@@ -177,8 +348,28 @@ func.func @test_mhlo_reduce_max(%arg0: tensor<1x128x128xf32>) -> tensor<128xf32>
   return %1 : tensor<128xf32>
 }
 // CHECK-LABEL: func.func @test_mhlo_reduce_max
-// CHECK-NEXT: byre.compute @ReduceMaxOp(%arg0)
+// CHECK-NEXT: tensor.empty() : tensor<128xf32>
+// CHECK-NEXT: byre.compute_on_tensor @ReduceMaxOp
 //   CHECK-DAG: dimensions = dense<[0, 1]>
+
+// -----
+
+func.func @test_dynamic_mhlo_reduce_max(%arg0: tensor<1x128x?xf32>) -> tensor<?xf32> attributes {__placeholder__byre.entry_point} {
+  %0 = mhlo.constant dense<0xFF800000> : tensor<f32>
+  %1 = "mhlo.reduce"(%arg0, %0) ({
+  ^bb0(%arg1: tensor<f32>, %arg2: tensor<f32>):
+    %2 = mhlo.maximum %arg1, %arg2 : (tensor<f32>, tensor<f32>) -> tensor<f32>
+    mhlo.return %2 : tensor<f32>
+  }) {dimensions = dense<[0, 1]> : tensor<2xi64>} : (tensor<1x128x?xf32>, tensor<f32>) -> tensor<?xf32>
+  return %1 : tensor<?xf32>
+}
+// CHECK-LABEL: func.func @test_dynamic_mhlo_reduce_max
+// CHECK-NEXT: %[[C2:.*]] = arith.constant 2 : index
+// CHECK-NEXT: %[[DIM:.*]] = tensor.dim %arg0, %[[C2]] : tensor<1x128x?xf32>
+// CHECK-NEXT: %[[V0:.*]] = tensor.empty(%dim) : tensor<?xf32>
+// CHECK-NEXT: %[[V1:.*]] = byre.compute_on_tensor @ReduceMaxOp
+// CHECK-SAME: {dimensions = dense<[0, 1]> : tensor<2xi64>}
+// CHECK-SAME: ins(%arg0 : tensor<1x128x?xf32>) outs(%[[V0]] : tensor<?xf32>) : tensor<?xf32>
 
 // -----
 
@@ -192,8 +383,27 @@ func.func @test_mhlo_reduce_consecutive_dims(%arg0: tensor<2x128x128xf32>) -> te
   return %1 : tensor<128xf32>
 }
 // CHECK-LABEL: func.func @test_mhlo_reduce_consecutive_dims
-// CHECK-NEXT: byre.compute @ReduceSumOp(%arg0)
+// CHECK: byre.compute_on_tensor @ReduceSumOp
 //   CHECK-DAG: dimensions = dense<[0, 1]>
+
+// -----
+
+func.func @test_dynamic_mhlo_reduce_consecutive_dims(%arg0: tensor<?x128x64xf32>) -> tensor<?xf32> attributes {__placeholder__byre.entry_point} {
+  %0 = mhlo.constant dense<0.000000e+00> : tensor<f32>
+  %1 = "mhlo.reduce"(%arg0, %0) ({
+  ^bb0(%arg1: tensor<f32>, %arg2: tensor<f32>):
+    %2 = mhlo.add %arg1, %arg2 : (tensor<f32>, tensor<f32>) -> tensor<f32>
+    mhlo.return %2 : tensor<f32>
+  }) {dimensions = dense<[1, 2]> : tensor<2xi64>} : (tensor<?x128x64xf32>, tensor<f32>) -> tensor<?xf32>
+  return %1 : tensor<?xf32>
+}
+// CHECK-LABEL: func.func @test_dynamic_mhlo_reduce_consecutive_dims
+// CHECK-NEXT: %[[C0:.*]] = arith.constant 0 : index
+// CHECK-NEXT: %[[DIM:.*]] = tensor.dim %arg0, %[[C0]] : tensor<?x128x64xf32>
+// CHECK-NEXT: %[[V0:.*]] = tensor.empty(%[[DIM]]) : tensor<?xf32>
+// CHECK-NEXT: %[[V1:.*]] = byre.compute_on_tensor @ReduceSumOp
+// CHECK-SAME: {dimensions = dense<[1, 2]> : tensor<2xi64>}
+// CHECK-SAME: ins(%arg0 : tensor<?x128x64xf32>) outs(%[[V0]] : tensor<?xf32>) : tensor<?xf32>
 
 // -----
 
@@ -211,10 +421,9 @@ func.func @test_mhlo_reduce_window(%arg: tensor<1x64x112x112xf32>) -> tensor<1x6
   return %1 : tensor<1x64x56x56xf32>  
 }
 // CHECK-LABEL: func.func @test_mhlo_reduce_window
-// CHECK-NEXT: byre.compute @PoolMaxOp(%arg0)
-//   CHECK-DAG: padding = dense<{{\[}}[0, 0], [0, 0], [1, 1], [1, 1]]>
-//   CHECK-DAG: window_dimensions = dense<[1, 1, 3, 3]>
-//   CHECK-DAG: window_strides = dense<[1, 1, 2, 2]>
+// CHECK-NEXT: %0 = tensor.empty() : tensor<1x64x56x56xf32>
+// CHECK-NEXT: %1 = byre.compute_on_tensor @PoolMaxOp
+// CHECK-SAME: ins(%arg0 : tensor<1x64x112x112xf32>) outs(%0 : tensor<1x64x56x56xf32>) : tensor<1x64x56x56xf32>
 
 // -----
 
@@ -228,7 +437,10 @@ func.func @test_mhlo_cumsum(%arg0: tensor<1x16xi64>) -> tensor<1x16xi64>  attrib
   return %1 : tensor<1x16xi64>
 }
 // CHECK-LABEL: func.func @test_mhlo_cumsum
-// CHECK-NEXT: byre.compute @PoolSumOp(%arg0)
+// CHECK-NEXT: %0 = tensor.empty() : tensor<1x16xi64>
+// CHECK-NEXT: %1 = byre.compute_on_tensor @PoolSumOp
+// CHECK-DAG: {padding = dense<{{\[}}[0, 0], [15, 0]]> : tensor<2x2xi64>, window_dilations = dense<1> : tensor<2xi64>, window_dimensions = dense<[1, 16]> : tensor<2xi64>, window_strides = dense<1> : tensor<2xi64>}
+// CHECK-SAME: ins(%arg0 : tensor<1x16xi64>) outs(%0 : tensor<1x16xi64>) : tensor<1x16xi64>
 
 // -----
 
@@ -250,7 +462,8 @@ func.func @test_mhlo_select_and_scatter(%arg0: tensor<32x64x112x112xf16>, %arg1:
   return %1 : tensor<32x64x112x112xf16>
 }
 // CHECK-LABEL: func.func @test_mhlo_select_and_scatter
-// CHECK-NEXT: byre.compute @PoolMaxGradOp(%arg0, %arg1)
+// CHECK-NEXT: tensor.empty() : tensor<32x64x112x112xf16>
+// CHECK-NEXT: byre.compute_on_tensor @PoolMaxGradOp
 //   CHECK-DAG: padding = dense<{{\[}}[0, 0], [0, 0], [1, 1], [1, 1]]>
 //   CHECK-DAG: window_dimensions = dense<[1, 1, 3, 3]>
 //   CHECK-DAG: window_strides = dense<[1, 1, 2, 2]>
@@ -266,7 +479,8 @@ func.func @mhlo_scatter(%arg0: tensor<512x128xf32>, %arg1: tensor<128x1xi64>, %a
   return %0 : tensor<512x128xf32>
 }
 // CHECK-LABEL: func.func @mhlo_scatter
-// CHECK-NEXT: byre.compute @IndexPutOp
+// CHECK-NEXT: tensor.empty() : tensor<512x128xf32>
+// CHECK-NEXT: byre.compute_on_tensor @IndexPutOp
 //   CHECK-DAG: dim = 0
 
 // -----
@@ -276,7 +490,8 @@ func.func @mhlo_gather(%arg0: tensor<30522x128xf32>, %arg1: tensor<128xui32>) ->
   return %0 : tensor<128x128xf32>
 }
 // CHECK-LABEL: func.func @mhlo_gather
-// CHECK-NEXT: byre.compute @IndexSelectOp
+// CHECK-NEXT: tensor.empty() : tensor<128x128xf32>
+// CHECK-NEXT: byre.compute_on_tensor @IndexSelectOp
 //   CHECK-DAG: dim = 0
 
 // -----
@@ -293,3 +508,20 @@ func.func @mhlo_concatenate(%arg0: tensor<2x2xf32>, %arg1: tensor<2x3xf32>, %arg
 //   CHECK-DAG: [0, 2] [2, 3] [1, 1]
 // CHECK-NEXT: tensor.insert_slice
 //   CHECK-DAG: [0, 5] [2, 4] [1, 1]
+
+// -----
+
+func.func @dynamic_mhlo_concatenate(%arg0: tensor<?x3xf16>, %arg1: tensor<?x3xf16>, %arg2: tensor<?x3xf16>, %arg3: tensor<?x3xf16>, %arg4: tensor<?x3xf16>) -> tensor<?x15xf16> {
+  %0 = "mhlo.concatenate"(%arg0, %arg1, %arg2, %arg3, %arg4) {dimension = 1 : i64} : (tensor<?x3xf16>, tensor<?x3xf16>, tensor<?x3xf16>, tensor<?x3xf16>, tensor<?x3xf16>) -> tensor<?x15xf16>
+  return %0 : tensor<?x15xf16>
+}
+// CHECK-LABEL: func.func @dynamic_mhlo_concatenate
+// CHECK-NEXT: %[[C0:.*]] = arith.constant 0 : index
+// CHECK-DAG: %[[DIM:.*]] = tensor.dim %arg0, %[[C0]] : tensor<?x3xf16>
+// CHECK-DAG: %[[DIM0:.*]] = tensor.dim %arg0, %c0 : tensor<?x3xf16>
+// CHECK-NEXT: %[[V0:.*]] = tensor.empty(%[[DIM0]]) : tensor<?x15xf16>
+// CHECK-NEXT: %[[INSERT_SLICE:.*]] = tensor.insert_slice %arg0 into %[[V0]][0, 0] [%[[DIM]], 3] [1, 1] : tensor<?x3xf16> into tensor<?x15xf16>
+// CHECK-NEXT: %[[INSERT_SLICE1:.*]] = tensor.insert_slice %arg1 into %[[INSERT_SLICE]][0, 3] [%[[DIM]], 3] [1, 1] : tensor<?x3xf16> into tensor<?x15xf16>
+// CHECK-NEXT: %[[INSERT_SLICE2:.*]] = tensor.insert_slice %arg2 into %[[INSERT_SLICE1]][0, 6] [%[[DIM]], 3] [1, 1] : tensor<?x3xf16> into tensor<?x15xf16>
+// CHECK-NEXT: %[[INSERT_SLICE3:.*]] = tensor.insert_slice %arg3 into %[[INSERT_SLICE2]][0, 9] [%[[DIM]], 3] [1, 1] : tensor<?x3xf16> into tensor<?x15xf16>
+// CHECK-NEXT: %[[INSERT_SLICE4:.*]] = tensor.insert_slice %arg4 into %[[INSERT_SLICE3]][0, 12] [%[[DIM]], 3] [1, 1] : tensor<?x3xf16> into tensor<?x15xf16>

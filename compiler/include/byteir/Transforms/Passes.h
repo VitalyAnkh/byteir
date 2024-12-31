@@ -19,6 +19,7 @@
 #define BYTEIR_TRANSFORMS_PASSES_H
 
 #include "byteir/Transforms/AnchoredPipeline.h"
+#include "byteir/Transforms/ApplyPDLPatterns.h"
 #include "byteir/Transforms/Bufferize.h"
 #include "byteir/Transforms/CMAE.h"
 #include "byteir/Transforms/CanonicalizeExt.h"
@@ -31,10 +32,12 @@
 #include "byteir/Transforms/LoopTag.h"
 #include "byteir/Transforms/LoopUnroll.h"
 #include "byteir/Transforms/MemoryPlanning.h"
+#include "byteir/Transforms/ModuleTag.h"
 #include "byteir/Transforms/RemoveFuncBody.h"
 #include "byteir/Transforms/RewriteOpToStdCall.h"
 #include "byteir/Transforms/SetArgShape.h"
 #include "byteir/Transforms/SetSpace.h"
+#include "byteir/Transforms/ShapeFuncOutlining.h"
 #include "byteir/Transforms/TryCatchModulePipeline.h"
 
 namespace mlir {

@@ -1,0 +1,177 @@
+diff --git a/python/torch_mlir/extras/fx_importer.py b/python/torch_mlir/extras/fx_importer.py
+index 4692d049..7e5a3cb9 100644
+--- a/python/torch_mlir/extras/fx_importer.py
++++ b/python/torch_mlir/extras/fx_importer.py
+@@ -54,6 +54,10 @@ from torch._subclasses import (
+     FakeTensor as TorchFakeTensor,
+ )
+ 
++from torch.distributed._functional_collectives import (
++    AsyncCollectiveTensor as TorchAsyncCollectiveTensor
++)
++
+ from torch.fx import (
+     Graph,
+     GraphModule,
+@@ -1446,6 +1450,11 @@ class GraphNodeImporter:
+                     elif isinstance(target, TorchOpOverload):
+                         # Dispatch to an ATen op.
+                         self._import_torch_op_overload(loc, node)
++                    # ref: https://github.com/pytorch/pytorch/blob/main/torch/_ops.py#L1015
++                    elif isinstance(target, torch._ops.OpOverloadPacket):
++	                    # Retrieval OpOverload from node.meta and dispatch a aten op
++	                    assert "original_aten" in node.meta and node.meta["original_aten"] is not None
++	                    self._import_torch_op_overload(loc, node, node.meta["original_aten"]) 
+                     elif isinstance(target, HigherOrderOperator):
+                         self._import_hop(loc, node, target)
+                     else:
+@@ -1615,6 +1624,61 @@ class GraphNodeImporter:
+         for i, value in enumerate(operation.results):
+             self.bind_node_value(node, value, i + bind_none)
+ 
++    def _import_torch_c10d_functional_op_overload(
++        self,
++        node: torch_fx.node,
++        schema,
++        loc: Location,
++    ):
++        import torch.distributed.distributed_c10d as c10d
++        def resolve_group_name(group_name: str) -> Tuple[str, List[int], int]:
++            group = torch._C._distributed_c10d._resolve_process_group(group_name)
++            group_rank = group.rank()
++            group_size = group.size()
++            global_group_ranks = c10d.get_process_group_ranks(group)
++            return group_name, global_group_ranks, group_size
++
++        operands = []
++        group_size, tag = None, None,
++        for i, parameter in enumerate(schema.arguments):
++            if parameter.name == "group_name":
++                if i < len(node.args):
++                    group_name = node.args[i]
++                else:
++                    assert parameter.name in node.kwargs
++                    group_name = node.kwargs[parameter.name]
++                tmp_tag, global_global_ranks, tmp_group_size = resolve_group_name(group_name)
++                if group_size is None:
++                    group_size = tmp_group_size
++                if tag is None:
++                    tag = tmp_tag
++                global_global_ranks = torch_fx.immutable_collections.immutable_list(global_global_ranks)
++                operands.append(self._import_argument(loc, tag, str))
++                operands.append(self._import_argument(loc, global_global_ranks, torch.ListType.ofInts()))
++                operands.append(self._import_argument(loc, group_size, int))
++            elif parameter.name == "group_size":
++                group_size = node.args[i] if i < len(node.args) else node.kwargs["group_size"]
++            elif parameter.name == "tag":
++                tag = node.args[i] if i < len(node.args) else node.kwargs["tag"]
++            else:
++                if i < len(node.args):
++                    operands.append(
++                        self._import_argument(loc, node.args[i], parameter.type)
++                    )
++                elif parameter.name in node.kwargs:
++                    operands.append(
++                        self._import_argument(
++                            loc, node.kwargs[parameter.name], parameter.type
++                        )
++                    )
++                else:
++                    operands.append(
++                        self._import_default_value(
++                            loc, parameter.default_value, parameter.type
++                        )
++                    )
++        return operands
++
+     def _import_torch_op_overload(
+         self,
+         loc: Location,
+@@ -1656,24 +1720,30 @@ class GraphNodeImporter:
+             self._multi_result_nodes.add(node)
+ 
+         # Unroll operands from formal parameters, args and kwargs.
+-        operands = []
+-        for i, parameter in enumerate(schema.arguments):
+-            if i < len(node.args):
+-                operands.append(
+-                    self._import_argument(loc, node.args[i], parameter.type)
+-                )
+-            elif parameter.name in node.kwargs:
+-                operands.append(
+-                    self._import_argument(
+-                        loc, node.kwargs[parameter.name], parameter.type
++        if "c10d_functional" in mlir_op_name:
++            # Since pytorch has two sets of collective operators defined in different OpNamespaces,
++            # we are enforcing a unified one.
++            mlir_op_name = mlir_op_name.replace("_c10d_functional", "c10d_functional")
++            operands = self._import_torch_c10d_functional_op_overload(node, schema, loc)
++        else:
++            operands = []
++            for i, parameter in enumerate(schema.arguments):
++                if i < len(node.args):
++                    operands.append(
++                        self._import_argument(loc, node.args[i], parameter.type)
+                     )
+-                )
+-            else:
+-                operands.append(
+-                    self._import_default_value(
+-                        loc, parameter.default_value, parameter.type
++                elif parameter.name in node.kwargs:
++                    operands.append(
++                        self._import_argument(
++                            loc, node.kwargs[parameter.name], parameter.type
++                        )
++                    )
++                else:
++                    operands.append(
++                        self._import_default_value(
++                            loc, parameter.default_value, parameter.type
++                        )
+                     )
+-                )
+ 
+         operation = _emit_operation(
+             mlir_op_name, result_types=result_types, operands=operands, loc=loc
+@@ -2058,6 +2128,8 @@ def _make_vtensor_literal_op(
+ ) -> Operation:
+     mapping = py_attr_tracker.track(tensor)
+     if mapping.is_empty:
++        # unwrap from TorchAsyncCollectiveTensor
++        tensor = tensor.elem if isinstance(tensor, TorchAsyncCollectiveTensor) else tensor
+         # check support for bfloat16
+         assert not (
+             tensor.dtype == torch.bfloat16 and ml_dtypes is None
+@@ -2073,11 +2145,17 @@ def _make_vtensor_literal_op(
+         # detach() which throws an error as we are operating in a FakeTensorMode, hence the simplest way to get this raw
+         # buffer is via the indirection: Tensor -> list -> numpy array. This allows us to create a vtensor literal as
+         # desired, but also limits which data types we can support in this function (see TORCH_DTYPE_TO_NPY_TYPE above)
+-        np_tensor = np.array(tensor.tolist()).astype(npy_dtype)
++
++        # NOTE: if we torch.export a torch.nn.Module under fake mode, the parameters in the fx.GraphModule will be FakeTensor.
++        # So we specifically handle FakeTensor here by randomly generating a tensor of the same shape and dtype.
++        if isinstance(tensor, TorchFakeTensor):
++            np_tensor = np.random.rand(*list(tensor.shape)).astype(npy_dtype)
++        else:
++            np_tensor = np.array(tensor.tolist()).astype(npy_dtype)
+         # One element constants are more optimizable as splat DenseElementsAttr. DenseResourceElementsAttr does not
+         # support splats, so don't use it for that case. In addition, at the time of writing, it has bugs with handling
+         # 0d tensors.
+-        if np_tensor.size == 1:
++        if True:
+             try:
+                 dtype = tensor.dtype
+                 element_type = TORCH_DTYPE_TO_MLIR_TYPE[dtype]()
+@@ -2171,9 +2249,10 @@ def _emit_operation(
+     # which haven't been generated by torch_ods_gen.py.
+     context = loc.context
+     if not context.is_registered_operation(mlir_op_name):
++        mlir_op_name_ = mlir_op_name[6:] if mlir_op_name.startswith("torch.") else mlir_op_name
+         operation = Operation.create(
+             "torch.operator",
+-            attributes={"name": StringAttr.get(mlir_op_name)},
++            attributes={"name": StringAttr.get(mlir_op_name_)},
+             results=result_types,
+             operands=operands,
+             loc=loc,

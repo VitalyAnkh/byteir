@@ -16,10 +16,12 @@ declare_mlir_python_sources(ByteIRPythonSources.Common
   ADD_TO_PARENT ByteIRPythonSources
   SOURCES
     __init__.py
-    _byteir_registry.py
+    _backend_registry.py
     utils.py
     compile.py
+    pattern_matches.py
     tools/compiler.py
+    tools/cat_executor.py
 
     # involve byteir init hooks
     _mlir_libs/_site_initialize_0.py
@@ -52,8 +54,6 @@ declare_mlir_python_extension(ByteIRPythonExtensions.Main
     ByteIRModules.cpp
   EMBED_CAPI_LINK_LIBS
     ByteIRCAPI
-    StablehloCAPI
-    ChloCAPI
   PRIVATE_LINK_LIBS
     LLVMSupport
 )
@@ -72,13 +72,21 @@ add_mlir_python_common_capi_library(ByteIRCAPIAggregation
     MLIRPythonExtension.RegisterEverything
     MLIRHLOPythonSources
     MLIRHLOPythonExtensions
+    StablehloPythonSources
+    StablehloPythonExtensions
     ByteIRPythonSources
     ByteIRPythonExtensions
 )
 
+target_link_libraries(ByteIRCAPIAggregation PUBLIC MhloQuantToIntConversion)
+
 target_link_options(ByteIRCAPIAggregation
   PRIVATE $<$<PLATFORM_ID:Linux>:LINKER:--exclude-libs,ALL>
 )
+
+# only link soversion ByteIRCAPIAggregation
+get_target_property(LLVM_VERSION ByteIRCAPIAggregation VERSION)
+set_target_properties(ByteIRCAPIAggregation PROPERTIES SOVERSION ${LLVM_VERSION})
 
 ################################################################################
 # Python module
@@ -92,6 +100,8 @@ add_mlir_python_modules(ByteIRPythonModules
     MLIRPythonExtension.RegisterEverything
     MLIRHLOPythonSources
     MLIRHLOPythonExtensions
+    StablehloPythonSources
+    StablehloPythonExtensions
     ByteIRPythonSources
     ByteIRPythonExtensions
   COMMON_CAPI_LINK_LIBS

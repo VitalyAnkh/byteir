@@ -18,20 +18,29 @@
 #include "torch-frontend/Pipelines/Pipelines.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/Passes.h"
+#include "stablehlo/transforms/Passes.h"
 #include "torch-frontend/Conversion/Passes.h"
+#include "torch-frontend/Dialect/Torch/Transforms/Passes.h"
 #include "torch-frontend/Transforms/Passes.h"
 #include "torch-mlir/Conversion/TorchToArith/TorchToArith.h"
 #include "torch-mlir/Conversion/TorchToStablehlo/TorchToStablehlo.h"
+#include "torch-mlir/Dialect/Torch/Transforms/Passes.h"
 #include "torch-mlir/Dialect/TorchConversion/Transforms/Passes.h"
 
 using namespace mlir;
 using namespace mlir::torch;
 
-void mlir::torch_frontend::createTorchToMhloPipeline(OpPassManager &pm) {
-  pm.addNestedPass<func::FuncOp>(createConvertTorchToCustomCall());
-  pm.addNestedPass<func::FuncOp>(createConvertTorchToStablehloExt());
+namespace {
+// populate passes from
+// torch-mlir/lib/Dialect/TorchConversion/Transforms/Passes.cpp
+void populateTorchMLIRToStablehloPipeline(OpPassManager &pm) {
+  // Generate Stablehlo & Chlo ops.
+  pm.addNestedPass<func::FuncOp>(createConvertTorchToStablehloPass(
+      /*enableStaticShape=*/false, /*enableI32Index=*/false));
+  // Lowering Chlo ops to Stablehlo
   pm.addNestedPass<func::FuncOp>(
-      createConvertTorchToStablehloPass(false, false));
+      stablehlo::createChloLegalizeToStablehloPass());
+  // Lowering remained ops to Arith
   pm.addNestedPass<func::FuncOp>(createConvertTorchToArithPass());
 
   // Clean up any non-canonical code introduced above..
@@ -39,25 +48,42 @@ void mlir::torch_frontend::createTorchToMhloPipeline(OpPassManager &pm) {
   // The resolution of `dim` ops tends to create identical ops. CSE them.
   pm.addNestedPass<func::FuncOp>(createCSEPass());
 
-  // Clean up any non-canonical code introduced above..
-  pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
-  // The resolution of `dim` ops tends to create identical ops. CSE them.
-  pm.addNestedPass<func::FuncOp>(createCSEPass());
-
   // Finish the type conversion from `torch` types to the types of the
-  // MHLO backend contract.
-  pm.addPass(TorchConversion::createFuncBackendTypeConversionPass());
+  // StableHLO backend contract.
+  pm.addPass(
+      TorchConversion::createFuncBackendTypeConversionForStablehloPass());
   pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
   pm.addNestedPass<func::FuncOp>(
-      TorchConversion::createFinalizingBackendTypeConversionPass());
+      TorchConversion::createFinalizingBackendTypeConversionForStablehloPass());
 
-  // Verify that we have lowered to the form that Stablehlo backends
-  // expect. This fails compilation (signalPassFailure) if the IR is not in the
-  // correct form.
-  pm.addPass(TorchConversion::createVerifyStablehloBackendContractPass());
+  // Verify that we have lowered to Stablehlo ops.
+  // FIXME(lyq): disable verify because torch-frontend support lowering to ccl
+  // pm.addPass(TorchConversion::createVerifyStablehloBackendContractPass());
+
+  // Canonicalize Stablehlo dynamic ops to static ops
+  pm.addNestedPass<func::FuncOp>(
+      stablehlo::createStablehloCanonicalizeDynamismPass());
+  pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
+  pm.addPass(stablehlo::createStablehloRefineShapesPass());
+  pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
+  pm.addNestedPass<func::FuncOp>(
+      stablehlo::createStablehloCanonicalizeDynamismPass());
+  pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
+}
+} // namespace
+
+void mlir::torch_frontend::createTorchToStablehloPipeline(
+    OpPassManager &pm, const Torch::TorchLoweringPipelineOptions &options) {
+  pm.addNestedPass<func::FuncOp>(createFuseOpOnTorch(options.backendLegalOps));
+  pm.addNestedPass<func::FuncOp>(createConvertTorchToCcl());
+  pm.addNestedPass<func::FuncOp>(
+      createConvertTorchToCustomCall(options.backendLegalOps));
+  pm.addNestedPass<func::FuncOp>(createConvertTorchToStablehloExt());
+
+  populateTorchMLIRToStablehloPipeline(pm);
+
   // Perform additional canonicalization, which is not suitable in byteir
   // pipeline.
-  pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
   pm.addNestedPass<func::FuncOp>(createCanonicalizeExtPass());
 }
 
@@ -74,7 +100,7 @@ void mlir::torch_frontend::createTorchscriptToTorchPipeline(
 
 void mlir::torch_frontend::createTorchFunctionToTorchPipeline(
     OpPassManager &pm, const Torch::TorchLoweringPipelineOptions &options) {
-  // remove useless ops
+  // Remove useless ops
   pm.addNestedPass<func::FuncOp>(createEliminateUselessOpPass());
   pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
 
@@ -90,9 +116,33 @@ void mlir::torch_frontend::createTorchFunctionToTorchPipeline(
 
   // Fuse Torch Ops
   pm.addPass(createCSEPass());
-  pm.addNestedPass<func::FuncOp>(createFuseOpOnTorch());
+  pm.addNestedPass<func::FuncOp>(createFuseOpOnTorch({}));
 
   pm.addPass(Torch::createLowerToBackendContractPass(
-      options.maxIterations, options.decompose, options.backendLegalOps,
-      options.extraLibrary));
+      options.maxIterations, options.decompose, options.shapeDtypeRefine,
+      options.backendLegalOps, options.extraLibrary));
+}
+
+void mlir::torch_frontend::createTorchDynamoExportToTorchPipeline(
+    OpPassManager &pm, const Torch::TorchLoweringPipelineOptions &options) {
+  // Remove useless ops
+  pm.addNestedPass<func::FuncOp>(createEliminateUselessOpPass());
+  pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
+
+  // Rewrite custum ops to Torch.CustomOp
+  pm.addNestedPass<func::FuncOp>(createRewriteCustomOp());
+  pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
+
+  // Fuse Torch Ops
+  pm.addPass(createCSEPass());
+  pm.addNestedPass<func::FuncOp>(createFuseOpOnTorch({}));
+
+  pm.addNestedPass<func::FuncOp>(
+      Torch::createReduceOpVariantsPass(options.extraLibrary));
+  pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
+  if (options.decompose) {
+    pm.addNestedPass<func::FuncOp>(
+        Torch::createDecomposeComplexOpsPass(options.backendLegalOps));
+    pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
+  }
 }

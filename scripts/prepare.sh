@@ -1,13 +1,3 @@
-# note: need to apply mhlo patch with gcc8.3
-function apply_mhlo_patches() {
-  pushd $ROOT_PROJ_DIR/external/mlir-hlo
-  git clean -fd .
-  for patch in $ROOT_PROJ_DIR/external/patches/mlir-hlo/*; do
-    git apply $patch
-  done
-  popd
-}
-
 function apply_aitemplate_patches() {
   pushd $ROOT_PROJ_DIR/external/AITemplate
   git clean -fd .
@@ -26,11 +16,19 @@ function install_aitemplate() {
 }
 
 function load_llvm_prebuilt() {
-  LLVM_INSTALL_DIR="/data00/llvm_libraries/4592543a01609feb4b3c19e81a9d54743e15e329/llvm_build"
+  LLVM_INSTALL_DIR="/data00/llvm_libraries/6127f15e5b4834411e8f2e700e25c40490deec35/llvm_build"
 }
 
-function load_pytorch_llvm_prebuilt() {
-  TORCH_FRONTEND_LLVM_INSTALL_DIR="/data00/llvm_libraries/f7250179e22ce4aab96166493b27223fa28c2181/llvm_build"
+function install_mhlo_tools() {
+  python3 -m pip install /data00/mhlo_libraries/mhlo_tools-1.4.0-cp39-cp39-linux_x86_64.whl
+}
+
+function copy_external_libs() {
+  PREBUILT_FLASH_ATTN="/data00/external_libraries/libflash_attn.so"
+  mkdir $ROOT_PROJ_DIR/external_libs/libs
+  cp $PREBUILT_FLASH_ATTN $ROOT_PROJ_DIR/external_libs/libs
+  mkdir $ROOT_PROJ_DIR/runtime/test/test_files/external_libs/
+  cp $PREBUILT_FLASH_ATTN $ROOT_PROJ_DIR/runtime/test/test_files/external_libs/
 }
 
 function prepare_for_compiler() {
@@ -43,4 +41,5 @@ function prepare_for_compiler() {
 function prepare_for_runtime() {
   git submodule update --init --recursive -f external/mlir-hlo external/cutlass external/date external/googletest external/pybind11
   load_llvm_prebuilt
+  copy_external_libs
 }

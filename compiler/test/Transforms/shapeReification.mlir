@@ -62,6 +62,24 @@ func.func @gelu(%arg0: tensor<?x3072xf32>) -> tensor<?x3072xf32> {
   return %0 : tensor<?x3072xf32>
 }
 
+func.func @tf_StridedSlice(%arg0: tensor<?x5x64xf16>) -> tensor<?x5x1x64xf16> {
+  %0 = mhlo.constant dense<1> : tensor<4xi32>
+  %1 = mhlo.constant dense<0> : tensor<4xi32>
+  %2 = mhlo.custom_call @tf.StridedSlice(%arg0, %1, %1, %0) {backend_config = "", byteir_attrs = {begin_mask = 11 : i64, ellipsis_mask = 0 : i64, end_mask = 11 : i64, new_axis_mask = 4 : i64, shrink_axis_mask = 0 : i64}} : (tensor<?x5x64xf16>, tensor<4xi32>, tensor<4xi32>, tensor<4xi32>) -> tensor<?x5x1x64xf16>
+  %cst = arith.constant 0 : index
+  %dim = tensor.dim %2, %cst : tensor<?x5x1x64xf16>
+  // CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
+  // CHECK-DAG: %[[C1:.*]] = arith.constant -1 : index
+  // CHECK-DAG: %[[C2:.*]] = arith.constant 1 : index
+  // CHECK-DAG: %[[DIM:.*]] = tensor.dim %arg0, %[[C0]] : tensor<?x5x64xf16>
+  // CHECK-DAG: %[[V0:.*]] = shape.add %[[DIM]], %[[C1]] : index, index -> index
+  // CHECK-DAG: %[[V1:.*]] = shape.div %[[V0]], %[[C2]] : index, index -> index
+  // CHECK-DAG: %[[V2:.*]] = shape.add %[[V1]], %[[C2]] : index, index -> index
+  // CHECK-DAG: "shape_ext.tie"(%2, %[[V2]]) : (tensor<?x5x1x64xf16>, index) -> ()
+  "shape_ext.tie"(%2, %dim) : (tensor<?x5x1x64xf16>, index) -> ()
+  return %2 : tensor<?x5x1x64xf16>
+}
+
 // CHECK-LABEL: func.func @dot_general
 func.func @dot_general(%arg0: tensor<?x?x4xf32>, %arg1: tensor<?x4x128xf32>) -> tensor<3xindex> {
   %c1 = arith.constant 1 : index
@@ -69,7 +87,7 @@ func.func @dot_general(%arg0: tensor<?x?x4xf32>, %arg1: tensor<?x4x128xf32>) -> 
   // CHECK-DAG: %[[C0:.+]] = arith.constant 0 : index
   // CHECK-DAG: %[[C1:.+]] = arith.constant 1 : index
   %0 = "mhlo.dot_general"(%arg0, %arg1) {dot_dimension_numbers = #mhlo.dot<lhs_batching_dimensions = [0], rhs_batching_dimensions = [0], lhs_contracting_dimensions = [2], rhs_contracting_dimensions = [1]>} : (tensor<?x?x4xf32>, tensor<?x4x128xf32>) -> tensor<?x?x128xf32>
-  // CHECK-DAG: %[[V0:.+]] = "mhlo.dot_general"(%arg0, %arg1) {dot_dimension_numbers = #mhlo.dot<lhs_batching_dimensions = [0], rhs_batching_dimensions = [0], lhs_contracting_dimensions = [2], rhs_contracting_dimensions = [1]>} : (tensor<?x?x4xf32>, tensor<?x4x128xf32>) -> tensor<?x?x128xf32>
+  // CHECK-DAG: %[[V0:.+]] = "mhlo.dot_general"(%arg0, %arg1) <{dot_dimension_numbers = #mhlo.dot<lhs_batching_dimensions = [0], rhs_batching_dimensions = [0], lhs_contracting_dimensions = [2], rhs_contracting_dimensions = [1]>}> : (tensor<?x?x4xf32>, tensor<?x4x128xf32>) -> tensor<?x?x128xf32>
   // CHECK-DAG: %[[V1:.+]] = tensor.dim %arg0, %[[C0]] : tensor<?x?x4xf32>
   // CHECK-DAG: %[[V2:.+]] = tensor.dim %arg0, %[[C1]] : tensor<?x?x4xf32>
   %1 = tensor.dim %0, %c0 : tensor<?x?x128xf32>

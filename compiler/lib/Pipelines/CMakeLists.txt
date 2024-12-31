@@ -2,16 +2,17 @@ add_subdirectory(Common)
 add_subdirectory(GPU)
 add_subdirectory(Host)
 
-add_mlir_library(ByteIRPipelines
+add_byteir_pipeline_library(ByteIRPipelines
   AffineOpt.cpp
   AllOpt.cpp
   BufferizeOpt.cpp
   ByreHost.cpp
   ByreOpt.cpp
   ByreTensorOpt.cpp
-  CatOpt.cpp
+  CatFusionOpt.cpp
   CatPreprocess.cpp
-  HloOpt.cpp
+  HloGraphOpt.cpp
+  HloFusionOpt.cpp
   LinalgMemrefOpt.cpp
   LinalgTensorOpt.cpp
   SCFOpt.cpp
@@ -30,6 +31,7 @@ add_mlir_library(ByteIRPipelines
   ByteIRMemRefPasses
   ByteIRTransforms
   ByteIRUtils
+  MLIRBufferTransforms
 
   LINK_LIBS PUBLIC
   ByteIRGPUPipelines
@@ -52,4 +54,5 @@ add_mlir_library(ByteIRPipelines
   ByteIRToByre
   ByteIRToGPU
   ByteIRToLinalg
+  MLIRBufferTransforms
 )

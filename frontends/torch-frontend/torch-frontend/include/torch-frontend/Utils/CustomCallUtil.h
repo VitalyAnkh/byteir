@@ -51,8 +51,6 @@ constexpr llvm::StringRef getGeLUName() {
   return CUSTOM_CALL_NAME_PREFIX "gelu";
 }
 
-constexpr llvm::StringRef getErfName() { return CUSTOM_CALL_NAME_PREFIX "erf"; }
-
 constexpr llvm::StringRef getTopKName() {
   return CUSTOM_CALL_NAME_PREFIX "top_k";
 }
@@ -81,6 +79,10 @@ constexpr llvm::StringRef getAddNName() {
   return CUSTOM_CALL_NAME_PREFIX "addn";
 }
 
+constexpr llvm::StringRef getResizeName() {
+  return CUSTOM_CALL_NAME_PREFIX "resize";
+}
+
 constexpr llvm::StringRef getDynamicPartitionName() {
   return TF_NAME_PREFIX "DynamicPartition";
 }
@@ -95,6 +97,10 @@ constexpr llvm::StringRef getDynamicMaskStitchName() {
 
 constexpr llvm::StringRef getFlashAttnFwdName() {
   return CUSTOM_CALL_NAME_PREFIX "flash_attn_fwd";
+}
+
+constexpr llvm::StringRef getFlashAttnKVCacheName() {
+  return CUSTOM_CALL_NAME_PREFIX "flash_attn_kvcache";
 }
 
 constexpr llvm::StringRef getFlashAttnBwdName() {

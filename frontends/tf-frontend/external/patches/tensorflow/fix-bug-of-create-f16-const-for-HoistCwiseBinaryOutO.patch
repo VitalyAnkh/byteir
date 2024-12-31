@@ -1,0 +1,41 @@
+diff --git a/tensorflow/compiler/mlir/tensorflow/ir/tf_ops_a_m.cc b/tensorflow/compiler/mlir/tensorflow/ir/tf_ops_a_m.cc
+index 36fb36a3d45..86241e3b80f 100644
+--- a/tensorflow/compiler/mlir/tensorflow/ir/tf_ops_a_m.cc
++++ b/tensorflow/compiler/mlir/tensorflow/ir/tf_ops_a_m.cc
+@@ -1339,12 +1339,12 @@ LogicalResult HoistCwiseBinaryOutOfConcat::matchAndRewrite(
+   // Process `exceptions`: For each value there, synthesize a binary op of the
+   // above kind, so that the concat hoisting optimization can still apply.
+   if (!exceptions.empty()) {
+-    int identity_val;
++    float identity_val;
+     if (isa<AddOp>(first_arg_op) || isa<SubOp>(first_arg_op))
+-      identity_val = 0;
++      identity_val = 0.0;
+     else if (isa<MulOp>(first_arg_op) || isa<DivOp>(first_arg_op) ||
+              isa<RealDivOp>(first_arg_op))
+-      identity_val = 1;
++      identity_val = 1.0;
+     else
+       return failure();
+     DenseElementsAttr const_attr;
+@@ -1354,8 +1354,19 @@ LogicalResult HoistCwiseBinaryOutOfConcat::matchAndRewrite(
+     if (mlir::isa<FloatType>(scalar_dtype))
+       const_attr = DenseElementsAttr::get(scalar_tensor_type,
+                                           static_cast<float>(identity_val));
+-    else
++    if (mlir::isa<FloatType>(scalar_dtype)) {
++      // const_attr = DenseFPElementsAttr::get(scalar_tensor_type, APFloat(identity_val));
++      APFloat epsilonFloat = APFloat(identity_val);
++      bool losesInfo = false;
++      auto status = epsilonFloat.convert(
++          mlir::cast<FloatType>(scalar_dtype).getFloatSemantics(), APFloat::rmNearestTiesToEven, &losesInfo);
++      if(losesInfo || status != llvm::APFloatBase::opStatus::opOK) {
++        return op.emitError("float type conversion failed");
++      }
++      const_attr = DenseElementsAttr::get(scalar_tensor_type, epsilonFloat);
++    } else {
+       return failure();
++    }
+ 
+     // All checks are passes, and we now prepare for rewrite.
+     auto identity_const = rewriter.create<TF::ConstOp>(loc, const_attr);

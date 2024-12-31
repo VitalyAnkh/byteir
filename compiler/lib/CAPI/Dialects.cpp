@@ -17,24 +17,37 @@
 
 #include "byteir-c/Dialects.h"
 
+#include "byteir/Dialect/Ace/AceDialect.h"
+#include "byteir/Dialect/Byre/ByreDialect.h"
+#include "byteir/Dialect/Byre/Serialization/ByreSerialOps.h"
 #include "byteir/Dialect/Cat/IR/CatDialect.h"
+#include "byteir/Dialect/Ccl/IR/CclOps.h"
 #include "byteir/Dialect/Ccl/TransformOps/CclTransformOps.h"
+#include "byteir/Dialect/GPU/TransformOps/GPUExtTransformOps.h"
 #include "byteir/Dialect/Linalg/TransformOps/LinalgExtTransformOps.h"
 #include "byteir/Dialect/Tensor/IR/TilingInterfaceImpl.h"
 #include "byteir/Dialect/Transform/IR/TransformExtOps.h"
 #include "byteir/Utils/OpInterfaceUtils.h"
+#include "byteir/Utils/PatternMatch.h"
 #include "mlir/CAPI/Registration.h"
 
 using namespace mlir;
 
 MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(Cat, cat, mlir::cat::CatDialect)
+MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(Ace, ace, mlir::ace::AceDialect)
+MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(Ccl, ccl, mlir::ccl::CclDialect)
+MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(Byre, byre, mlir::byre::ByreDialect)
+MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(
+    ByreSerial, byre_serial, mlir::byre::serialization::ByreSerialDialect)
 
 void byteirRegisterDialectExtensions(MlirContext context) {
   DialectRegistry registry;
-  registeOpInterfaceExtensions(registry);
+  registerOpInterfaceExtensions(registry);
+  registerPDLPatternHooksInterface(registry);
   ccl::registerTransformDialectExtension(registry);
   linalg_ext::registerTransformDialectExtension(registry);
   transform_ext::registerTransformDialectExtension(registry);
   tensor_ext::registerTilingInterfaceExternalModels(registry);
+  gpu_ext::registerTransformDialectExtension(registry);
   unwrap(context)->appendDialectRegistry(registry);
 }

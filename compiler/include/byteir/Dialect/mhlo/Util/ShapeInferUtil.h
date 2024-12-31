@@ -81,7 +81,7 @@ inferBoundedReturnTypeComponents(llvm::StringRef name);
 
 using InferReturnTypeComponents = std::function<LogicalResult(
     MLIRContext *, std::optional<Location>, ValueShapeRange operands,
-    DictionaryAttr, RegionRange,
+    DictionaryAttr, OpaqueProperties, RegionRange,
     SmallVectorImpl<ShapedTypeComponents> &inferredReturnTypes)>;
 
 struct InferReturnTypeComponentsRegistration {
@@ -91,6 +91,8 @@ struct InferReturnTypeComponentsRegistration {
 
 InferReturnTypeComponents inferReturnTypeComponents(llvm::StringRef name);
 
+LogicalResult reifyShapes(OpBuilder &builder, Operation *op,
+                          SmallVectorImpl<Value> &reifications);
 } // namespace mlir
 
 #endif // BYTEIR_DIALECT_MHLO_UTIL_SHAPEINFERUTIL_H

@@ -1,0 +1,216 @@
+// RUN: byteir-translate %s --mlir-to-llvmir | FileCheck %s
+
+// CHECK-LABEL: define void @_mlir_ciface_Unknown
+
+module attributes {byre.container_module} {
+  llvm.func @Unknown0(%arg0: !llvm.ptr, %arg1: !llvm.ptr, %arg2: i64, %arg3: !llvm.ptr, %arg4: !llvm.ptr, %arg5: i64, %arg6: !llvm.ptr, %arg7: !llvm.ptr, %arg8: i64, %arg9: i64, %arg10: i64, %arg11: i64, %arg12: i64) attributes {__byre__kernel_name = "Unknown0", __byre__llvm_file_name = "host_kernels.ll", __byteir_hlo_aggressive_fusion__, arg_offsets = [0 : i32, 1 : i32, 2 : i32], byre_compute_name = "LLVMJITOp", byre_force_compute_name, llvm.emit_c_interface} {
+    %0 = llvm.mlir.constant(97 : index) : i64
+    %1 = llvm.mlir.constant(1 : index) : i64
+    %2 = llvm.mlir.constant(0 : index) : i64
+    %3 = llvm.mlir.constant(1103515245 : i32) : i32
+    %4 = llvm.mlir.constant(12345 : i32) : i32
+    %5 = llvm.mlir.constant(3528531795 : i64) : i64
+    %6 = llvm.mlir.constant(3449720151 : i64) : i64
+    %7 = llvm.mlir.constant(32 : i64) : i64
+    %8 = llvm.mlir.constant(-1640531527 : i32) : i32
+    %9 = llvm.mlir.constant(-1150833019 : i32) : i32
+    %10 = llvm.mlir.constant(2.3283064365386963E-10 : f64) : f64
+    %11 = llvm.mlir.constant(1013904242 : i32) : i32
+    %12 = llvm.mlir.constant(1993301258 : i32) : i32
+    %13 = llvm.mlir.constant(-626627285 : i32) : i32
+    %14 = llvm.mlir.constant(842468239 : i32) : i32
+    %15 = llvm.mlir.constant(2027808484 : i32) : i32
+    %16 = llvm.mlir.constant(-308364780 : i32) : i32
+    %17 = llvm.mlir.constant(387276957 : i32) : i32
+    %18 = llvm.mlir.constant(-1459197799 : i32) : i32
+    %19 = llvm.mlir.constant(-1253254570 : i32) : i32
+    %20 = llvm.mlir.constant(1684936478 : i32) : i32
+    %21 = llvm.mlir.constant(1401181199 : i32) : i32
+    %22 = llvm.mlir.constant(534103459 : i32) : i32
+    %23 = llvm.mlir.constant(-616729560 : i32) : i32
+    %24 = llvm.mlir.constant(-1879881855 : i32) : i32
+    %25 = llvm.mlir.constant(0.000000e+00 : f32) : f32
+    llvm.br ^bb1(%2 : i64)
+  ^bb1(%26: i64):  // 2 preds: ^bb0, ^bb2
+    %27 = llvm.icmp "slt" %26, %0 : i64
+    llvm.cond_br %27, ^bb2, ^bb3
+  ^bb2:  // pred: ^bb1
+    %28 = llvm.load %arg1 : !llvm.ptr -> i64
+    %29 = llvm.load %arg4 : !llvm.ptr -> i64
+    %30 = llvm.trunc %28 : i64 to i32
+    %31 = llvm.trunc %29 : i64 to i32
+    %32 = llvm.add %30, %31 : i32
+    %33 = llvm.mul %32, %3 : i32
+    %34 = llvm.add %33, %4 : i32
+    %35 = llvm.trunc %26 : i64 to i32
+    %36 = llvm.add %35, %34 : i32
+    %37 = llvm.mul %36, %3 : i32
+    %38 = llvm.add %37, %4 : i32
+    %39 = llvm.zext %38 : i32 to i64
+    %40 = llvm.mul %39, %5 : i64
+    %41 = llvm.trunc %40 : i64 to i32
+    %42 = llvm.lshr %40, %7  : i64
+    %43 = llvm.trunc %42 : i64 to i32
+    %44 = llvm.xor %43, %31  : i32
+    %45 = llvm.add %30, %8 : i32
+    %46 = llvm.add %31, %9 : i32
+    %47 = llvm.zext %30 : i32 to i64
+    %48 = llvm.zext %44 : i32 to i64
+    %49 = llvm.mul %47, %5 : i64
+    %50 = llvm.trunc %49 : i64 to i32
+    %51 = llvm.lshr %49, %7  : i64
+    %52 = llvm.trunc %51 : i64 to i32
+    %53 = llvm.mul %48, %6 : i64
+    %54 = llvm.trunc %53 : i64 to i32
+    %55 = llvm.lshr %53, %7  : i64
+    %56 = llvm.trunc %55 : i64 to i32
+    %57 = llvm.xor %56, %45  : i32
+    %58 = llvm.xor %52, %41  : i32
+    %59 = llvm.xor %58, %46  : i32
+    %60 = llvm.add %30, %11 : i32
+    %61 = llvm.add %31, %12 : i32
+    %62 = llvm.zext %57 : i32 to i64
+    %63 = llvm.zext %59 : i32 to i64
+    %64 = llvm.mul %62, %5 : i64
+    %65 = llvm.trunc %64 : i64 to i32
+    %66 = llvm.lshr %64, %7  : i64
+    %67 = llvm.trunc %66 : i64 to i32
+    %68 = llvm.mul %63, %6 : i64
+    %69 = llvm.trunc %68 : i64 to i32
+    %70 = llvm.lshr %68, %7  : i64
+    %71 = llvm.trunc %70 : i64 to i32
+    %72 = llvm.xor %71, %54  : i32
+    %73 = llvm.xor %72, %60  : i32
+    %74 = llvm.xor %67, %50  : i32
+    %75 = llvm.xor %74, %61  : i32
+    %76 = llvm.add %30, %13 : i32
+    %77 = llvm.add %31, %14 : i32
+    %78 = llvm.zext %73 : i32 to i64
+    %79 = llvm.zext %75 : i32 to i64
+    %80 = llvm.mul %78, %5 : i64
+    %81 = llvm.trunc %80 : i64 to i32
+    %82 = llvm.lshr %80, %7  : i64
+    %83 = llvm.trunc %82 : i64 to i32
+    %84 = llvm.mul %79, %6 : i64
+    %85 = llvm.trunc %84 : i64 to i32
+    %86 = llvm.lshr %84, %7  : i64
+    %87 = llvm.trunc %86 : i64 to i32
+    %88 = llvm.xor %87, %69  : i32
+    %89 = llvm.xor %88, %76  : i32
+    %90 = llvm.xor %83, %65  : i32
+    %91 = llvm.xor %90, %77  : i32
+    %92 = llvm.add %30, %15 : i32
+    %93 = llvm.add %31, %16 : i32
+    %94 = llvm.zext %89 : i32 to i64
+    %95 = llvm.zext %91 : i32 to i64
+    %96 = llvm.mul %94, %5 : i64
+    %97 = llvm.trunc %96 : i64 to i32
+    %98 = llvm.lshr %96, %7  : i64
+    %99 = llvm.trunc %98 : i64 to i32
+    %100 = llvm.mul %95, %6 : i64
+    %101 = llvm.trunc %100 : i64 to i32
+    %102 = llvm.lshr %100, %7  : i64
+    %103 = llvm.trunc %102 : i64 to i32
+    %104 = llvm.xor %103, %85  : i32
+    %105 = llvm.xor %104, %92  : i32
+    %106 = llvm.xor %99, %81  : i32
+    %107 = llvm.xor %106, %93  : i32
+    %108 = llvm.add %30, %17 : i32
+    %109 = llvm.add %31, %18 : i32
+    %110 = llvm.zext %105 : i32 to i64
+    %111 = llvm.zext %107 : i32 to i64
+    %112 = llvm.mul %110, %5 : i64
+    %113 = llvm.trunc %112 : i64 to i32
+    %114 = llvm.lshr %112, %7  : i64
+    %115 = llvm.trunc %114 : i64 to i32
+    %116 = llvm.mul %111, %6 : i64
+    %117 = llvm.trunc %116 : i64 to i32
+    %118 = llvm.lshr %116, %7  : i64
+    %119 = llvm.trunc %118 : i64 to i32
+    %120 = llvm.xor %119, %101  : i32
+    %121 = llvm.xor %120, %108  : i32
+    %122 = llvm.xor %115, %97  : i32
+    %123 = llvm.xor %122, %109  : i32
+    %124 = llvm.add %30, %19 : i32
+    %125 = llvm.add %31, %20 : i32
+    %126 = llvm.zext %121 : i32 to i64
+    %127 = llvm.zext %123 : i32 to i64
+    %128 = llvm.mul %126, %5 : i64
+    %129 = llvm.trunc %128 : i64 to i32
+    %130 = llvm.lshr %128, %7  : i64
+    %131 = llvm.trunc %130 : i64 to i32
+    %132 = llvm.mul %127, %6 : i64
+    %133 = llvm.trunc %132 : i64 to i32
+    %134 = llvm.lshr %132, %7  : i64
+    %135 = llvm.trunc %134 : i64 to i32
+    %136 = llvm.xor %135, %117  : i32
+    %137 = llvm.xor %136, %124  : i32
+    %138 = llvm.xor %131, %113  : i32
+    %139 = llvm.xor %138, %125  : i32
+    %140 = llvm.add %30, %21 : i32
+    %141 = llvm.add %31, %22 : i32
+    %142 = llvm.zext %137 : i32 to i64
+    %143 = llvm.zext %139 : i32 to i64
+    %144 = llvm.mul %142, %5 : i64
+    %145 = llvm.trunc %144 : i64 to i32
+    %146 = llvm.lshr %144, %7  : i64
+    %147 = llvm.trunc %146 : i64 to i32
+    %148 = llvm.mul %143, %6 : i64
+    %149 = llvm.lshr %148, %7  : i64
+    %150 = llvm.trunc %149 : i64 to i32
+    %151 = llvm.xor %150, %133  : i32
+    %152 = llvm.xor %151, %140  : i32
+    %153 = llvm.xor %147, %129  : i32
+    %154 = llvm.xor %153, %141  : i32
+    %155 = llvm.add %31, %23 : i32
+    %156 = llvm.zext %152 : i32 to i64
+    %157 = llvm.zext %154 : i32 to i64
+    %158 = llvm.mul %156, %5 : i64
+    %159 = llvm.lshr %158, %7  : i64
+    %160 = llvm.trunc %159 : i64 to i32
+    %161 = llvm.mul %157, %6 : i64
+    %162 = llvm.trunc %161 : i64 to i32
+    %163 = llvm.xor %160, %145  : i32
+    %164 = llvm.xor %163, %155  : i32
+    %165 = llvm.add %30, %24 : i32
+    %166 = llvm.zext %164 : i32 to i64
+    %167 = llvm.mul %166, %6 : i64
+    %168 = llvm.lshr %167, %7  : i64
+    %169 = llvm.trunc %168 : i64 to i32
+    %170 = llvm.xor %169, %162  : i32
+    %171 = llvm.xor %170, %165  : i32
+    %172 = llvm.zext %171 : i32 to i64
+    %173 = llvm.uitofp %172 : i64 to f64
+    %174 = llvm.fmul %173, %10  : f64
+    %175 = llvm.fptrunc %174 : f64 to f32
+    %176 = llvm.fadd %175, %25  : f32
+    %177 = llvm.mul %2, %0 : i64
+    %178 = llvm.add %177, %26 : i64
+    %179 = llvm.getelementptr %arg7[%178] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+    llvm.store %176, %179 : f32, !llvm.ptr
+    %180 = llvm.add %26, %1 : i64
+    llvm.br ^bb1(%180 : i64)
+  ^bb3:  // pred: ^bb1
+    llvm.return
+  }
+  llvm.func @_mlir_ciface_Unknown0(%arg0: !llvm.ptr, %arg1: !llvm.ptr, %arg2: !llvm.ptr) attributes {__byre__kernel_name = "Unknown0", __byre__llvm_file_name = "host_kernels.ll", __byteir_hlo_aggressive_fusion__, arg_offsets = [0 : i32, 1 : i32, 2 : i32], byre_compute_name = "LLVMJITOp", byre_force_compute_name, llvm.emit_c_interface} {
+    %0 = llvm.load %arg0 : !llvm.ptr -> !llvm.struct<(ptr, ptr, i64)>
+    %1 = llvm.extractvalue %0[0] : !llvm.struct<(ptr, ptr, i64)> 
+    %2 = llvm.extractvalue %0[1] : !llvm.struct<(ptr, ptr, i64)> 
+    %3 = llvm.extractvalue %0[2] : !llvm.struct<(ptr, ptr, i64)> 
+    %4 = llvm.load %arg1 : !llvm.ptr -> !llvm.struct<(ptr, ptr, i64)>
+    %5 = llvm.extractvalue %4[0] : !llvm.struct<(ptr, ptr, i64)> 
+    %6 = llvm.extractvalue %4[1] : !llvm.struct<(ptr, ptr, i64)> 
+    %7 = llvm.extractvalue %4[2] : !llvm.struct<(ptr, ptr, i64)> 
+    %8 = llvm.load %arg2 : !llvm.ptr -> !llvm.struct<(ptr, ptr, i64, array<2 x i64>, array<2 x i64>)>
+    %9 = llvm.extractvalue %8[0] : !llvm.struct<(ptr, ptr, i64, array<2 x i64>, array<2 x i64>)> 
+    %10 = llvm.extractvalue %8[1] : !llvm.struct<(ptr, ptr, i64, array<2 x i64>, array<2 x i64>)> 
+    %11 = llvm.extractvalue %8[2] : !llvm.struct<(ptr, ptr, i64, array<2 x i64>, array<2 x i64>)> 
+    %12 = llvm.extractvalue %8[3, 0] : !llvm.struct<(ptr, ptr, i64, array<2 x i64>, array<2 x i64>)> 
+    %13 = llvm.extractvalue %8[3, 1] : !llvm.struct<(ptr, ptr, i64, array<2 x i64>, array<2 x i64>)> 
+    %14 = llvm.extractvalue %8[4, 0] : !llvm.struct<(ptr, ptr, i64, array<2 x i64>, array<2 x i64>)> 
+    %15 = llvm.extractvalue %8[4, 1] : !llvm.struct<(ptr, ptr, i64, array<2 x i64>, array<2 x i64>)> 
+    llvm.call @Unknown0(%1, %2, %3, %5, %6, %7, %9, %10, %11, %12, %13, %14, %15) : (!llvm.ptr, !llvm.ptr, i64, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64) -> ()
+    llvm.return
+  }
+}

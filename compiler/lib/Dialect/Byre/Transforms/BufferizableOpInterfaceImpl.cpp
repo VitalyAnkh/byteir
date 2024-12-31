@@ -38,8 +38,8 @@ FailureOr<Value> getBufferInValidLayout(RewriterBase &rewriter, Location loc,
   // from dynamic to static offset or stride (the canonicalization cannot know
   // at this point that it is really cast compatible).
   static auto isGuaranteedCastCompatible = [](Type source, Type target) {
-    MemRefType sourceMemRef = source.dyn_cast_or_null<MemRefType>();
-    MemRefType targetMemRef = target.dyn_cast_or_null<MemRefType>();
+    MemRefType sourceMemRef = dyn_cast_or_null<MemRefType>(source);
+    MemRefType targetMemRef = dyn_cast_or_null<MemRefType>(target);
     if (!sourceMemRef || !targetMemRef)
       return false;
 
@@ -66,9 +66,9 @@ FailureOr<Value> getBufferInValidLayout(RewriterBase &rewriter, Location loc,
   auto buffer = *bufferOrNot;
 
   auto memRefType = MemRefType::get(
-      opOperand.get().getType().cast<TensorType>().getShape(),
-      opOperand.get().getType().cast<TensorType>().getElementType(),
-      AffineMap(), buffer.getType().cast<MemRefType>().getMemorySpace());
+      cast<TensorType>(opOperand.get().getType()).getShape(),
+      cast<TensorType>(opOperand.get().getType()).getElementType(), AffineMap(),
+      cast<MemRefType>(buffer.getType()).getMemorySpace());
 
   // TODO: check whether buffer is in valid layout map, e.g. identity layout map
   if (buffer.getType() != memRefType) {
@@ -80,11 +80,8 @@ FailureOr<Value> getBufferInValidLayout(RewriterBase &rewriter, Location loc,
     } else {
       // TODO: Create alloc_tensor ops during TensorCopyInsertion.
       AnalysisState analysisState(options);
-      FailureOr<Value> tensorAlloc = allocateTensorForShapedValue(
-          rewriter, loc, opOperand.get(),
-          !options.createDeallocs ||
-              analysisState.isTensorYielded(opOperand.get()),
-          options);
+      FailureOr<Value> tensorAlloc =
+          allocateTensorForShapedValue(rewriter, loc, opOperand.get(), options);
       if (failed(tensorAlloc))
         return failure();
       buffer = rewriter.create<bufferization::ToMemrefOp>(loc, memRefType,
@@ -94,10 +91,94 @@ FailureOr<Value> getBufferInValidLayout(RewriterBase &rewriter, Location loc,
   return buffer;
 }
 
-struct ByreComputeOpBufferization
-    : public BufferizableOpInterface::ExternalModel<ByreComputeOpBufferization,
-                                                    byre::ComputeOp> {
-  bool bufferizesToAllocation(Operation * /*op*/, OpResult /*opResult*/) const {
+struct ByreComputeOnTensorOpBufferization
+    : public BufferizableOpInterface::ExternalModel<
+          ByreComputeOnTensorOpBufferization, byre::ComputeOnTensorOp> {
+  bool bufferizesToMemoryRead(Operation *op, OpOperand &opOperand,
+                              const AnalysisState &state) const {
+    auto genericOp = cast<DestinationStyleOpInterface>(op);
+    return !genericOp.isDpsInit(&opOperand);
+  }
+
+  bool bufferizesToMemoryWrite(Operation *op, OpOperand &opOperand,
+                               const AnalysisState &state) const {
+    auto genericOp = cast<DestinationStyleOpInterface>(op);
+    return genericOp.isDpsInit(&opOperand);
+  }
+
+  AliasingValueList getAliasingValues(Operation *op, OpOperand &opOperand,
+                                      const AnalysisState & /*state*/) const {
+    auto genericOp = cast<DestinationStyleOpInterface>(op);
+    // The i-th "out" tensor may alias with the i-th OpResult.
+    if (genericOp.isDpsInit(&opOperand))
+      return {
+          {genericOp.getTiedOpResult(&opOperand), BufferRelation::Equivalent}};
+    return {};
+  }
+
+  LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
+                          const BufferizationOptions &options) const {
+    auto DpsOp = cast<DestinationStyleOpInterface>(op);
+    OpBuilder::InsertionGuard g(rewriter);
+    rewriter.setInsertionPoint(op);
+
+    if (DpsOp.hasPureBufferSemantics())
+      return success();
+
+    if (!DpsOp.hasPureTensorSemantics())
+      return DpsOp->emitError() << "op does not have tensor semantics";
+
+    SmallVector<Value> newInputBuffers;
+    for (OpOperand *opOperand : DpsOp.getDpsInputOperands()) {
+      if (DpsOp.isScalar(opOperand)) {
+        newInputBuffers.push_back(opOperand->get());
+        continue;
+      }
+      FailureOr<Value> buffer =
+          getBufferInValidLayout(rewriter, op->getLoc(), *opOperand, options);
+      if (failed(buffer))
+        return failure();
+      newInputBuffers.push_back(*buffer);
+    }
+
+    SmallVector<Value> newOutputBuffers;
+    for (OpResult opResult : DpsOp->getOpResults()) {
+      OpOperand *opOperand =
+          DpsOp.getDpsInitOperand(opResult.getResultNumber());
+      FailureOr<Value> resultBuffer =
+          getBufferInValidLayout(rewriter, op->getLoc(), *opOperand, options);
+      if (failed(resultBuffer))
+        return failure();
+      newOutputBuffers.push_back(*resultBuffer);
+    }
+
+    rewriter.setInsertionPoint(op);
+
+    // Convert ComputeOnTensorOp to ComputeOp
+    auto newOp = rewriter.create<byre::ComputeOp>(
+        op->getLoc(), cast<byre::ComputeOnTensorOp>(op).getCallee(),
+        newInputBuffers, newOutputBuffers);
+
+    for (auto &&namedAttr : op->getAttrs()) {
+      StringRef name = namedAttr.getName();
+      if ((!name.starts_with("bufferization.") &&
+           name != "operandSegmentSizes") &&
+          !newOp->hasAttr(name)) {
+        newOp->setAttr(name, namedAttr.getValue());
+      }
+    }
+
+    bufferization::replaceOpWithBufferizedValues(rewriter, op,
+                                                 newOutputBuffers);
+
+    return success();
+  }
+};
+
+struct ByreCustomOpBufferization
+    : public BufferizableOpInterface::ExternalModel<ByreCustomOpBufferization,
+                                                    byre::CustomOp> {
+  bool bufferizesToAllocation(Operation * /*op*/, Value /*value*/) const {
     return true;
   }
 
@@ -111,9 +192,9 @@ struct ByreComputeOpBufferization
     return false;
   }
 
-  AliasingOpResultList
-  getAliasingOpResults(Operation * /*op*/, OpOperand & /*opOperand*/,
-                       const AnalysisState & /*state*/) const {
+  AliasingValueList getAliasingValues(Operation * /*op*/,
+                                      OpOperand & /*opOperand*/,
+                                      const AnalysisState & /*state*/) const {
     return {};
   }
 
@@ -131,13 +212,12 @@ struct ByreComputeOpBufferization
     }
 
     for (auto &&opResult : op->getOpResults()) {
-      auto tensorType = opResult.getType().dyn_cast_or_null<RankedTensorType>();
+      auto tensorType = dyn_cast_or_null<RankedTensorType>(opResult.getType());
       if (!tensorType)
         return failure();
 
-      bool dealloc = shouldDeallocateOpResult(opResult, options);
-      auto tensorAlloc = allocateTensorForShapedValue(
-          rewriter, op->getLoc(), opResult, /*escapse*/ !dealloc, options);
+      auto tensorAlloc = allocateTensorForShapedValue(rewriter, op->getLoc(),
+                                                      opResult, options);
       if (failed(tensorAlloc))
         return failure();
 
@@ -148,13 +228,15 @@ struct ByreComputeOpBufferization
       bufferResults.push_back(buffer);
     }
 
-    auto newOp = rewriter.create<byre::ComputeOp>(
-        op->getLoc(), cast<byre::ComputeOp>(op).getCallee(), bufferOperands,
-        bufferResults);
+    auto newOp = rewriter.create<byre::CustomOp>(
+        op->getLoc(), cast<byre::CustomOp>(op).getLibPath(),
+        cast<byre::CustomOp>(op).getApiName(),
+        cast<byre::CustomOp>(op).getVersion(), bufferOperands, bufferResults,
+        cast<byre::CustomOp>(op).getExtraArgs());
 
     for (auto &&namedAttr : op->getAttrs()) {
       StringRef name = namedAttr.getName();
-      if (!name.startswith("bufferization.") && !newOp->hasAttr(name)) {
+      if (!name.starts_with("bufferization.") && !newOp->hasAttr(name)) {
         newOp->setAttr(name, namedAttr.getValue());
       }
     }
@@ -168,6 +250,8 @@ struct ByreComputeOpBufferization
 void mlir::byre::registerBufferizableOpInterfaceExternalModels(
     DialectRegistry &registry) {
   registry.addExtension(+[](MLIRContext *ctx, byre::ByreDialect *) {
-    byre::ComputeOp::attachInterface<ByreComputeOpBufferization>(*ctx);
+    byre::ComputeOnTensorOp::attachInterface<
+        ByreComputeOnTensorOpBufferization>(*ctx);
+    byre::CustomOp::attachInterface<ByreCustomOpBufferization>(*ctx);
   });
 }

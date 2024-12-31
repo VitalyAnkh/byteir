@@ -43,7 +43,7 @@ constructNewArgumentTypes(func::FuncOp funcOp,
   for (unsigned i = 0; i < funcOp.getNumArguments(); ++i) {
     Type origType = funcOp.getArgumentTypes()[i];
 
-    auto origRankedType = origType.dyn_cast<RankedTensorType>();
+    auto origRankedType = dyn_cast<RankedTensorType>(origType);
     if (!origRankedType) {
       LLVM_DEBUG(llvm::dbgs()
                  << "Argument " << i << "is not of type RankedTensorType.\n");
@@ -100,8 +100,8 @@ LogicalResult mlir::runStaticShapeInfer(func::FuncOp funcOp,
     }
 
     DataFlowSolver solver;
-    solver.load<MhloShapeAnalysis>();
-    solver.load<MhloShapeValueAnalysis>();
+    solver.load<MhloStaticShapeAnalysis>();
+    solver.load<MhloStaticShapeValueAnalysis>();
     solver.load<DeadCodeAnalysis>();
     if (failed(solver.initializeAndRun(funcOp)))
       return failure();
@@ -113,14 +113,14 @@ LogicalResult mlir::runStaticShapeInfer(func::FuncOp funcOp,
 
     funcOp->walk([&](Operation *op) {
       for (auto &&it : op->getResults()) {
-        auto originalType = it.getType().dyn_cast<ShapedType>();
+        auto originalType = dyn_cast<ShapedType>(it.getType());
         if (!originalType || originalType.hasStaticShape())
           continue;
 
         ShapedType newType;
-        if (auto lattice = solver.lookupState<ShapeLattice>(it)) {
+        if (auto lattice = solver.lookupState<StaticShapeLattice>(it)) {
           if (!lattice->getValue().isUninitialized())
-            newType = lattice->getValue().getType().dyn_cast<ShapedType>();
+            newType = dyn_cast<ShapedType>(lattice->getValue().getType());
         }
 
         if (!newType || !newType.hasRank())

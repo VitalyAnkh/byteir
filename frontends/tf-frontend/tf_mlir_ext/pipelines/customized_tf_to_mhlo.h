@@ -31,9 +31,12 @@ namespace tfext {
 std::unique_ptr<OperationPass<ModuleOp>> createCustomizedTfToMhloPipelinePass(
     const std::vector<std::string> &customcall_ops = {},
     bool remove_control_flow = false, bool staticalize_dynamic_shape = false,
+    bool stop_after_convert_to_tf_dialect = false,
     bool stop_after_rewrite_custom_call = false,
     const std::unordered_map<std::string, Attribute>
-        &additional_main_func_attrs = {});
+        &additional_main_func_attrs = {},
+    bool set_assuming_to_be_true = true, bool replace_where_to_static = false,
+    int64_t repeat_out_batch_size = -1);
 
 } // namespace tfext
 } // namespace mlir

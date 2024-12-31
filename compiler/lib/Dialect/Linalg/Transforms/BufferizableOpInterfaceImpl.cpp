@@ -52,12 +52,12 @@ bufferizeDestinationStyleOpInterface(RewriterBase &rewriter,
   rewriter.setInsertionPoint(op);
 
   // Nothing to do. This op is already bufferized.
-  if (op.hasBufferSemantics())
+  if (op.hasPureBufferSemantics())
     return success();
 
   // Ensure op has only tensors. Allow mixed tensor-buffer mode on a per-need
   // basis.
-  if (!op.hasTensorSemantics())
+  if (!op.hasPureTensorSemantics())
     return op->emitError() << "op does not have tensor semantics";
 
   // New input operands for the cloned op.
@@ -136,22 +136,22 @@ bool LinalgExtBufferizableOpInterfaceImpl::bufferizesToMemoryWrite(
     Operation *op, OpOperand &opOperand, const AnalysisState &state) const {
   // Operand is written to if it has an aliasing OpResult.
   auto bufferizableOp = cast<BufferizableOpInterface>(op);
-  return bufferizableOp.getAliasingOpResults(opOperand, state)
-             .getNumAliases() != 0;
+  return bufferizableOp.getAliasingValues(opOperand, state).getNumAliases() !=
+         0;
 }
 
 bufferization::AliasingOpOperandList
 LinalgExtBufferizableOpInterfaceImpl::getAliasingOpOperands(
-    Operation *op, OpResult opResult, const AnalysisState &) const {
+    Operation *op, Value value, const AnalysisState &) const {
   auto genericOp = cast<DestinationStyleOpInterface>(op);
 
   // The i-th OpResult may alias with the i-th "out" tensor.
-  return {{genericOp.getDpsInitOperand(opResult.getResultNumber()),
+  return {{genericOp.getDpsInitOperand(cast<OpResult>(value).getResultNumber()),
            BufferRelation::Equivalent}};
 }
 
-bufferization::AliasingOpResultList
-LinalgExtBufferizableOpInterfaceImpl::getAliasingOpResults(
+bufferization::AliasingValueList
+LinalgExtBufferizableOpInterfaceImpl::getAliasingValues(
     Operation *op, OpOperand &opOperand, const AnalysisState &) const {
   auto genericOp = cast<DestinationStyleOpInterface>(op);
 

@@ -37,6 +37,23 @@ def AnchoredPipeline : Pass<"anchored-pipeline"> {
 }
 
 //===----------------------------------------------------------------------===//
+// ApplyPDLPatterns
+//===----------------------------------------------------------------------===//
+
+def ApplyPDLPatterns : Pass<"apply-pdl-patterns"> {
+  let summary = "Apply pdl patterns on given module";
+  let constructor = "mlir::createApplyPDLPatternsPass()";
+  let options = [
+    Option<"pdlFile", "pdl-file", "std::string",
+           /*default=*/"", "To specify the pdl module file.">,
+  ];
+  let dependentDialects = [
+    "::mlir::pdl::PDLDialect",
+    "::mlir::pdl_interp::PDLInterpDialect"
+  ];
+}
+
+//===----------------------------------------------------------------------===//
 // TryCatch Module Pipeline
 //===----------------------------------------------------------------------===//
 
@@ -76,6 +93,9 @@ def CanonicalizeExt : Pass<"canonicalize-ext"> {
     Option<"maxIterations", "max-iterations", "int64_t",
            /*default=*/"10",
            "Seed the worklist in general top-down order">,
+    Option<"foldLimit", "fold-limit", "int64_t",
+           /*default=*/"0",
+           "Fold constants which size less equal than foldLimit, -1 means no limit">,
     Option<"blindFold", "blind-fold", "bool",
            /*default=*/"false",
            "Fold constants even if it may finally bloat the compilation result">
@@ -158,6 +178,9 @@ def GraphCanonicalize : Pass<"graph-canonicalize"> {
     Option<"maxIterations", "max-iterations", "int64_t",
            /*default=*/"10",
            "Seed the worklist in general top-down order">,
+    Option<"foldLimit", "fold-limit", "int64_t",
+           /*default=*/"0",
+           "Fold constants which size less equal than foldLimit, -1 means no limit">,
     Option<"blindFold", "blind-fold", "bool",
            /*default=*/"false",
            "Fold constants even if it may finally bloat the compilation result">
@@ -181,6 +204,37 @@ def FuncTag : Pass<"func-tag", "ModuleOp"> {
     Option<"funcName", "func-name", "std::string",
             /*default=*/"",
             "An optional name to specify target functions.">
+  ];
+}
+
+//===----------------------------------------------------------------------===//
+// RemoveFuncTag
+//===----------------------------------------------------------------------===//
+
+def RemoveFuncTag : Pass<"remove-func-tag", "ModuleOp"> {
+  let summary = "Remove Tag based on func name and attr";
+  let constructor = "mlir::createRemoveFuncTagPass()";
+  let options = [
+    Option<"attrName", "attr-name", "std::string",
+            /*default=*/"",
+            "An optional attribute removing from target functions.">,
+    Option<"funcName", "func-name", "std::string",
+            /*default=*/"",
+            "An optional name to specify target functions.">
+  ];
+}
+
+//===----------------------------------------------------------------------===//
+// RemoveModuleTag
+//===----------------------------------------------------------------------===//
+
+def RemoveModuleTag : Pass<"remove-module-tag", "ModuleOp"> {
+  let summary = "Remove Tag on ModuleOp";
+  let constructor = "mlir::createRemoveModuleTagPass()";
+  let options = [
+    Option<"attrName", "attr-name", "std::string",
+           /*default=*/"",
+           "An optional attribute removing from module.">
   ];
 }
 
@@ -209,7 +263,9 @@ def GraphClusteringByDevice : Pass<"graph-clustering-by-device", "ModuleOp"> {
               clEnumValN(mlir::GraphClusteringAlgo::kTopDown, "TopDown", "Create and merge device cluster progressively from top to bottom"),
               clEnumValN(mlir::GraphClusteringAlgo::kBottomUp, "BottomUp", "Create and merge device cluster progressively from bottom to top"),
               clEnumValN(mlir::GraphClusteringAlgo::kGreedy, "Greedy", "Choose largest subgraph from BottomUp or TopDown strategy")
-            )}]>
+            )}]>,
+    Option<"enableMultiGraph", "enable-multi-graph", "bool", /*default=*/"false",
+           "create multi device func as possible.">,
   ];
 }
 
@@ -422,6 +478,20 @@ def SetOpSpace: Pass<"set-op-space", "func::FuncOp"> {
     Option<"space", "space", "std::string",
             /*default=*/"",
             "Specified space for all ops">,
+  ];
+}
+
+//===----------------------------------------------------------------------===//
+// Shape func outlining
+//===----------------------------------------------------------------------===//
+
+def ShapeFuncOutlining : Pass<"shape-func-outlining", "ModuleOp"> {
+  let summary = "Outline all shape computation in entry func to a shape func";
+  let constructor = "mlir::createShapeFuncOutliningPass()";
+  let options = [
+    Option<"entryFuncName", "entry-func-name", "std::string",
+            /*default=*/"\"main\"",
+            "Used to specify the entry-function.">
   ];
 }
 

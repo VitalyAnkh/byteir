@@ -16,10 +16,12 @@ limitations under the License.
 
 #include "byteir/Analysis/Liveness.h"
 #include "byteir/Analysis/UseRange.h"
-#include "lhlo/IR/lhlo_ops.h"
 #include "mlir/Dialect/Bufferization/Transforms/BufferUtils.h"
 #include "mlir/Dialect/Bufferization/Transforms/BufferViewFlowAnalysis.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Pass/Pass.h"
+
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 
 using namespace mlir;
 using namespace byteir;
@@ -37,9 +39,7 @@ struct TestPrintUseRangePass
     return "Print the contents of a constructed use range information.";
   }
 
-  void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<mlir::lmhlo::LmhloDialect>();
-  }
+  void getDependentDialects(DialectRegistry &registry) const override {}
   void runOnOperation() override {
     llvm::outs() << "Testing : " << getOperation().getName() << "\n";
     auto op = getOperation();

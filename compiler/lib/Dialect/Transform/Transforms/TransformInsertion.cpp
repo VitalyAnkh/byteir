@@ -68,8 +68,8 @@ void insertTransformIR(func::FuncOp funcOp, OpBuilder &builder,
                 ctx, b.getNamedAttr(annotation, UnitAttr::get(ctx)));
             auto match = b.create<transform::MatchOp>(
                 loc, blockArg.getType(), blockArg, ArrayAttr(),
-                transform::MatchInterfaceEnumAttr(), annotationAttr,
-                TypeAttr());
+                transform::MatchInterfaceEnumAttr(), annotationAttr, TypeAttr(),
+                ArrayAttr());
             ImplicitLocOpBuilder ib(loc, b);
             config.transformBuilder(ib, op, match);
             b.create<transform::YieldOp>(loc);
@@ -93,11 +93,13 @@ void insertTransformIR(ModuleOp m, const TransformInsertionConfig &config) {
 struct DetensorizeTransformInsertionPass
     : public DetensorizeTransformInsertionBase<
           DetensorizeTransformInsertionPass> {
-  explicit DetensorizeTransformInsertionPass(const std::string &funcAnchor,
+  explicit DetensorizeTransformInsertionPass(const bool usingVectorizeOp,
+                                             const std::string &funcAnchor,
                                              const std::string &matchPrefix)
       : DetensorizeTransformInsertionBase() {
     this->funcAnchorAttr = funcAnchor;
     this->matchPrefix = matchPrefix;
+    this->usingVectorizeOp = usingVectorizeOp;
   }
 
   void getDependentDialects(DialectRegistry &registry) const override {
@@ -106,7 +108,7 @@ struct DetensorizeTransformInsertionPass
   }
 
   static bool isScalarTensorOp(linalg::LinalgOp linalgOp) {
-    if (!linalgOp.hasTensorSemantics())
+    if (!linalgOp.hasPureTensorSemantics())
       return false;
 
     if (linalgOp.getNumLoops() != 0)
@@ -135,9 +137,18 @@ struct DetensorizeTransformInsertionPass
       return false;
     };
 
-    auto transformBuilder = [](ImplicitLocOpBuilder &b, Operation *,
-                               Value pdlValue) {
-      b.create<transform::DetensorizeOp>(pdlValue);
+    auto transformBuilder = [=](ImplicitLocOpBuilder &b, Operation *op,
+                                Value pdlValue) {
+      if (usingVectorizeOp && llvm::isa<linalg::FillOp>(op)) {
+        b.create<transform::VectorizeOp>(
+            /* target */ pdlValue,
+            /* vector_sizes */ ValueRange{},
+            /* static_vector_sizes */ SmallVector<int64_t>{},
+            /* vectorize_nd_extract */ b.getUnitAttr(),
+            /* scalable_sizes */ SmallVector<bool>{});
+      } else {
+        b.create<transform::DetensorizeOp>(pdlValue);
+      }
     };
 
     insertTransformIR(getOperation(), {funcAnchorAttr, matchPrefix, opFilter,
@@ -256,10 +267,11 @@ struct RewriteInDPSTransformInsertionPass
 } // namespace
 
 std::unique_ptr<OperationPass<ModuleOp>>
-mlir::createDetensorizeTransformInsertionPass(const std::string &funcAnchor,
+mlir::createDetensorizeTransformInsertionPass(const bool usingVectorizeOp,
+                                              const std::string &funcAnchor,
                                               const std::string &matchPrefix) {
-  return std::make_unique<DetensorizeTransformInsertionPass>(funcAnchor,
-                                                             matchPrefix);
+  return std::make_unique<DetensorizeTransformInsertionPass>(
+      usingVectorizeOp, funcAnchor, matchPrefix);
 }
 
 std::unique_ptr<OperationPass<ModuleOp>>

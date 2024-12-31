@@ -18,11 +18,13 @@
 #include "byteir/Conversion/FuncToByre/FuncToByre.h"
 #include "byteir/Dialect/Byre/ByreDialect.h"
 #include "byteir/Dialect/Byre/Common.h"
+#include "byteir/Dialect/mhlo/Util/Util.h"
 #include "byteir/Utils/Utils.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/Shape/IR/Shape.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
@@ -66,9 +68,14 @@ public:
     auto key = byre::getByreKey(nameAttr.getValue(), op->getOperandTypes(),
                                 op->getResultTypes(), effectiveAppendArgTypes);
 
-    auto computeOp = rewriter.replaceOpWithNewOp<byre::ComputeOp>(
-        op, op->getResultTypes(), key, op->getOperands(),
-        /*memEffects*/ ArrayAttr());
+    auto failureOrEmptyTensors = createEmptyTensorForOpResult(rewriter, op);
+    if (failed(failureOrEmptyTensors)) {
+      return failure();
+    }
+    auto computeOnTensorOp =
+        rewriter.replaceOpWithNewOp<byre::ComputeOnTensorOp>(
+            op, op->getResultTypes(), key, op->getOperands(),
+            *failureOrEmptyTensors);
 
     // copy byre attr, and remove prefix
     SmallVector<NamedAttribute> attrs;
@@ -79,7 +86,7 @@ public:
       }
     }
 
-    addAttrs(computeOp.getOperation(), attrs);
+    addAttrs(computeOnTensorOp.getOperation(), attrs);
 
     return success();
   }
@@ -92,9 +99,8 @@ class ConvertGPULaunchFuncToByrePattern
     : public OpRewritePattern<gpu::LaunchFuncOp> {
 
 public:
-  ConvertGPULaunchFuncToByrePattern(MLIRContext *ctx, bool useBarePtrCallConv)
-      : OpRewritePattern<gpu::LaunchFuncOp>(ctx),
-        useBarePtrCallConv(useBarePtrCallConv) {}
+  ConvertGPULaunchFuncToByrePattern(MLIRContext *ctx)
+      : OpRewritePattern<gpu::LaunchFuncOp>(ctx) {}
 
   LogicalResult matchAndRewrite(gpu::LaunchFuncOp launchOp,
                                 PatternRewriter &rewriter) const override {
@@ -122,10 +128,11 @@ public:
     computeOp->setAttr("BlockSize.y", rewriter.getI32IntegerAttr(by));
     computeOp->setAttr("BlockSize.z", rewriter.getI32IntegerAttr(bz));
 
-    if (useBarePtrCallConv) {
-      computeOp->setAttr(byre::getKernelCallConventionAttrName(),
-                         rewriter.getStringAttr("bare_ptr"));
+    // get discardable attributes from gpu.launch
+    for (auto attr : launchOp->getDiscardableAttrDictionary().getValue()) {
+      computeOp->setAttr(attr.getName(), attr.getValue());
     }
+
     rewriter.eraseOp(launchOp);
 
     return success();
@@ -157,14 +164,11 @@ public:
 struct ConvertGPULaunchFuncToByrePass
     : public ConvertGPULaunchFuncToByreBase<ConvertGPULaunchFuncToByrePass> {
 public:
-  ConvertGPULaunchFuncToByrePass(bool useBarePtrCallConv)
-      : ConvertGPULaunchFuncToByreBase() {
-    this->useBarePtrCallConv = useBarePtrCallConv;
-  }
+  ConvertGPULaunchFuncToByrePass() : ConvertGPULaunchFuncToByreBase() {}
   void runOnOperation() override {
     MLIRContext &ctx = getContext();
     RewritePatternSet patterns(&ctx);
-    populateGPULaunchFuncToByrePattern(patterns, useBarePtrCallConv);
+    populateGPULaunchFuncToByrePattern(patterns);
     if (failed(applyPatternsAndFoldGreedily(getOperation(),
                                             std::move(patterns)))) {
       signalPassFailure();
@@ -179,10 +183,8 @@ void mlir::populateFuncToByreTensorPattern(RewritePatternSet &patterns,
                                                  appendArgTypes);
 }
 
-void mlir::populateGPULaunchFuncToByrePattern(RewritePatternSet &patterns,
-                                              bool useBarePtrCallConv) {
-  patterns.add<ConvertGPULaunchFuncToByrePattern>(patterns.getContext(),
-                                                  useBarePtrCallConv);
+void mlir::populateGPULaunchFuncToByrePattern(RewritePatternSet &patterns) {
+  patterns.add<ConvertGPULaunchFuncToByrePattern>(patterns.getContext());
 }
 
 std::unique_ptr<OperationPass<ModuleOp>>
@@ -190,7 +192,6 @@ mlir::createConvertFuncToByreTensorPass(bool appendArgTypes) {
   return std::make_unique<ConvertFuncToByreTensorPass>(appendArgTypes);
 }
 
-std::unique_ptr<Pass>
-mlir::createConvertGPULaunchFuncToByrePass(bool useBarePtrCallConv) {
-  return std::make_unique<ConvertGPULaunchFuncToByrePass>(useBarePtrCallConv);
+std::unique_ptr<Pass> mlir::createConvertGPULaunchFuncToByrePass() {
+  return std::make_unique<ConvertGPULaunchFuncToByrePass>();
 }

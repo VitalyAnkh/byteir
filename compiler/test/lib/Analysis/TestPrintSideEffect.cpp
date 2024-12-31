@@ -16,8 +16,20 @@
 //===----------------------------------------------------------------------===//
 
 #include "byteir/Analysis/SideEffect.h"
-#include "lhlo/IR/lhlo_ops.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
+
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/Dialect.h"
+#include "mlir/IR/Operation.h"
+#include "mlir/Interfaces/ControlFlowInterfaces.h"
+#include "mlir/Interfaces/CopyOpInterface.h"
+#include "mlir/Interfaces/LoopLikeInterface.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "mlir/Interfaces/ViewLikeInterface.h"
 
 using namespace mlir;
 using namespace byteir;
@@ -33,9 +45,7 @@ struct TestPrintArgSideEffectPass
 
   StringRef getDescription() const final { return "Print the arg side effect"; }
 
-  void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<mlir::lmhlo::LmhloDialect>();
-  }
+  void getDependentDialects(DialectRegistry &registry) const override {}
 
   void runOnOperation() override {
     auto &os = llvm::outs();

@@ -31,6 +31,11 @@ using namespace mlir;
 using namespace mlir::byre;
 using namespace mlir::byre::serialization;
 
+std::string Version::getBytecodeProducerString() const {
+  return "BYRE_" + std::to_string(major) + "_" + std::to_string(minor) + "_" +
+         std::to_string(patch);
+}
+
 uint32_t Version::getBytecodeVersion() const {
   return bytecode::BytecodeVersion::kNativePropertiesEncoding;
 }
@@ -73,7 +78,7 @@ std::optional<Version> Version::parse(llvm::StringRef versionStr) {
 }
 
 LogicalResult
-mlir::byre::serialization::verifySerializableIRVersion(Operation *topLvelOp,
+mlir::byre::serialization::verifySerializableIRVersion(Operation *topLevelOp,
                                                        const Version &version) {
   AttrTypeWalker typeAttrChecker;
   typeAttrChecker.addWalk([&](SerializableTypeInterface type) {
@@ -87,7 +92,7 @@ mlir::byre::serialization::verifySerializableIRVersion(Operation *topLvelOp,
     return WalkResult::advance();
   });
 
-  WalkResult result = topLvelOp->walk([&](Operation *op) {
+  WalkResult result = topLevelOp->walk([&](Operation *op) {
     if (auto iface = llvm::dyn_cast<SerializableOpInterface>(op)) {
       if (version < iface.getMinVersion() || iface.getMaxVersion() < version) {
         op->emitError() << " was not compatible with version "
@@ -137,6 +142,8 @@ mlir::byre::serialization::convertToVersion(Operation *topLevelOp,
   if (!Version::checkSupportedVersion(version))
     return topLevelOp->emitError()
            << "Version " << version.toString() << " was not supported";
+
+  // TODO: do upgrade or downgrade here
 
   return verifySerializableIRVersion(topLevelOp, version);
 }

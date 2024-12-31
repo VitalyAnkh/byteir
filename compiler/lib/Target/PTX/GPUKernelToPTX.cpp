@@ -33,6 +33,7 @@
 #include "llvm/Linker/Linker.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Passes/PassBuilder.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Target/TargetMachine.h"
@@ -43,29 +44,31 @@
 #include "llvm/Transforms/Vectorize/LoopVectorize.h"
 #include "llvm/Transforms/Vectorize/SLPVectorizer.h"
 
+#define DEBUG_TYPE "gpu-kernel-to-ptx"
+
 using namespace llvm;
 using namespace mlir;
 
 namespace {
 
 // TODO: maybe move another file
-static llvm::CodeGenOpt::Level LLVMCodeGenOpt(unsigned optLevel) {
-  llvm::CodeGenOpt::Level codegenOptLevel;
+static llvm::CodeGenOptLevel LLVMCodeGenOpt(unsigned optLevel) {
+  llvm::CodeGenOptLevel codegenOptLevel;
   switch (optLevel) {
   case 0:
-    codegenOptLevel = llvm::CodeGenOpt::None;
+    codegenOptLevel = llvm::CodeGenOptLevel::None;
     break;
   case 1:
-    codegenOptLevel = llvm::CodeGenOpt::Less;
+    codegenOptLevel = llvm::CodeGenOptLevel::Less;
     break;
   case 2:
-    codegenOptLevel = llvm::CodeGenOpt::Default;
+    codegenOptLevel = llvm::CodeGenOptLevel::Default;
     break;
   case 3:
-    codegenOptLevel = llvm::CodeGenOpt::Aggressive;
+    codegenOptLevel = llvm::CodeGenOptLevel::Aggressive;
     break;
   default:
-    codegenOptLevel = llvm::CodeGenOpt::Aggressive;
+    codegenOptLevel = llvm::CodeGenOptLevel::Aggressive;
     break;
   }
   return codegenOptLevel;
@@ -100,6 +103,17 @@ static void addOptimizationPasses(llvm::FunctionPassManager &fPM,
   mPM.addPass(llvm::AlwaysInlinerPass());
 }
 
+static void dump_llir(llvm::Module &llvmModule, const std::string &llirPath) {
+  std::error_code EC;
+  raw_fd_ostream dest(llirPath, EC, sys::fs::OF_Text);
+  if (!EC) {
+    llvmModule.print(dest, nullptr);
+  } else {
+    LLVM_DEBUG(llvm::dbgs() << "Error opening output IR file: " << EC.message()
+                            << "\n";);
+  }
+}
+
 class SerializeToPTX
     : public PassWrapper<SerializeToPTX, OperationPass<gpu::GPUModuleOp>> {
 public:
@@ -107,9 +121,11 @@ public:
 
   SerializeToPTX(unsigned opt, const std::string &libdeviceFile,
                  const std::string &triple, const std::string &chip,
-                 const std::string &features, std::string &targetISA)
+                 const std::string &features, std::string &targetISA,
+                 const std::string &llirPath)
       : optLevelAsInt(opt), libdeviceFile(libdeviceFile), triple(triple),
-        chip(chip), features(features), targetISA(targetISA) {}
+        chip(chip), features(features), targetISA(targetISA),
+        llirPath(llirPath) {}
 
   void runOnOperation() override;
 
@@ -143,6 +159,8 @@ private:
   std::string features;
 
   std::string &targetISA;
+
+  std::string llirPath;
 };
 
 void SerializeToPTX::runOnOperation() {
@@ -158,6 +176,10 @@ void SerializeToPTX::runOnOperation() {
   if (failed(linkLibdevice(*llvmModule, llvmContext))) {
     return signalPassFailure();
   }
+
+  // Dump llir for debugging.
+  if (!llirPath.empty())
+    dump_llir(*llvmModule, llirPath);
 
   std::unique_ptr<llvm::TargetMachine> targetMachine = createTargetMachine();
   if (!targetMachine)
@@ -200,7 +222,8 @@ void SerializeToPTX::translateToISA(llvm::Module &llvmModule,
   llvm::OptimizationLevel optLevel = mapToLevel(optLevelAsInt);
   llvm::PassBuilder pB(&targetMachine);
 
-  targetMachine.registerPassBuilderCallbacks(pB);
+  targetMachine.registerPassBuilderCallbacks(
+      pB, /*PopulateClassToPassNames=*/false);
 
   // Register all basic analyses
   llvm::LoopAnalysisManager lAM;
@@ -216,23 +239,22 @@ void SerializeToPTX::translateToISA(llvm::Module &llvmModule,
 
   llvm::FunctionPassManager fPM = pB.buildFunctionSimplificationPipeline(
       optLevel, llvm::ThinOrFullLTOPhase::None);
-  llvm::ModulePassManager mPM = pB.buildPerModuleDefaultPipeline(optLevel);
+  llvm::ModulePassManager mPM;
 
   fAM.registerPass([&] { return targetMachine.getTargetIRAnalysis(); });
 
   addOptimizationPasses(fPM, mPM, optLevel);
 
+  mPM.addPass(llvm::VerifierPass());
+  mPM.addPass(createModuleToFunctionPassAdaptor(std::move(fPM)));
+  mPM.addPass(pB.buildPerModuleDefaultPipeline(optLevel));
+  mPM.addPass(llvm::VerifierPass());
   mPM.run(llvmModule, mAM);
-  for (auto &f : llvmModule) {
-    if (!f.empty()) {
-      fPM.run(f, fAM);
-    }
-  }
 
   llvm::legacy::PassManager codegenPasses;
   codegenPasses.add(llvm::createVerifierPass());
   targetMachine.addPassesToEmitFile(codegenPasses, pstream, nullptr,
-                                    llvm::CGFT_AssemblyFile);
+                                    llvm::CodeGenFileType::AssemblyFile);
   codegenPasses.run(llvmModule);
 }
 
@@ -315,8 +337,9 @@ LogicalResult SerializeToPTX::linkLibdevice(llvm::Module &llvmModule,
 std::unique_ptr<OperationPass<gpu::GPUModuleOp>> mlir::createSerializeToPTXPass(
     unsigned optLevel, const std::string &libdeviceFile,
     const std::string &triple, const std::string &chip,
-    const std::string &features, std::string &targetISA) {
+    const std::string &features, std::string &targetISA,
+    const std::string &llirPath) {
 
   return std::make_unique<SerializeToPTX>(optLevel, libdeviceFile, triple, chip,
-                                          features, targetISA);
+                                          features, targetISA, llirPath);
 }

@@ -3,15 +3,6 @@
 
 include "mlir/Pass/PassBase.td"
 
-//===----------------------------------------------------------------------===//
-// RewriteToByteIREntryPoint
-//===----------------------------------------------------------------------===//
-
-def RewriteToByteIREntryPoint : Pass<"rewrite-to-byteir-entry-point", "ModuleOp"> {
-  let summary = "rewrite to byteir entry point.";
-  let constructor = "mlir::createRewriteToByteIREntryPoint()";
-}
-
 def CanonicalizeExt : Pass<"canonicalize-ext"> {
   let summary = "Perform as an extension of upstream canonicalize pass.";
   let description = [{
@@ -23,12 +14,20 @@ def CanonicalizeExt : Pass<"canonicalize-ext"> {
     Option<"topDownProcessingEnabled", "top-down", "bool",
            /*default=*/"true",
            "Seed the worklist in general top-down order">,
-    Option<"enableRegionSimplification", "region-simplify", "bool",
-           /*default=*/"true",
-           "Seed the worklist in general top-down order">,
+    Option<"enableRegionSimplification", "region-simplify", "mlir::GreedySimplifyRegionLevel",
+           /*default=*/"GreedySimplifyRegionLevel::Aggressive",
+           "Perform control flow optimizations to the region tree",
+             [{::llvm::cl::values(
+               clEnumValN(mlir::GreedySimplifyRegionLevel::Disabled, "disabled",
+                "Don't run any control-flow simplification."),
+               clEnumValN(mlir::GreedySimplifyRegionLevel::Normal, "normal",
+                "Perform simple control-flow simplifications (e.g. dead args elimination)."),
+               clEnumValN(mlir::GreedySimplifyRegionLevel::Aggressive, "aggressive",
+                "Perform aggressive control-flow simplification (e.g. block merging).")
+              )}]>,
     Option<"maxIterations", "max-iterations", "int64_t",
            /*default=*/"10",
-           "Seed the worklist in general top-down order">
+           "Max. iterations between applying patterns / simplifying regions">,
   ];
 }
 
@@ -48,6 +47,20 @@ def UnpackPublicFunctionReturn : Pass<"unpack-public-function-return", "func::Fu
 def EliminateUselessOp : Pass<"eliminate-useless-op", "func::FuncOp"> {
   let summary = "eliminate useless op before entering converion pass, i.e., torch.profiler.";
   let constructor = "mlir::createEliminateUselessOpPass()";
+}
+
+//===----------------------------------------------------------------------===//
+// RewriteEntryFuncName
+//===----------------------------------------------------------------------===//
+
+def RewriteEntryFuncName : Pass<"rewrite-entry-func-name", "ModuleOp"> {
+  let summary = "rewrite entry function's name";
+  let constructor = "mlir::createRewriteEntryFuncNamePass()";
+  let options = [
+    Option<"targetName", "target-name", "std::string",
+           /*default*/"",
+           "Rewrite entry function's name with the target name.">
+  ];
 }
 
 #endif // TORCH_FRONTEND_TRANSFORMS_PASSES_TD

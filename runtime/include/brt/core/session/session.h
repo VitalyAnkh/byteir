@@ -17,8 +17,8 @@
 
 #pragma once
 
-#include "brt/backends/device_api.h"
 #include "brt/core/common/status.h"
+#include "brt/core/framework/device_api.h"
 #include "brt/core/framework/dtype.h"
 #include <memory>
 #include <string>
@@ -140,6 +140,9 @@ public:
 
   // Set device
   void SetExecDevice(DeviceType device_type, int device_id = 0);
+
+  // Returns device type
+  DeviceType GetDeviceType() const;
 
 protected:
   // hold a set of execution providers

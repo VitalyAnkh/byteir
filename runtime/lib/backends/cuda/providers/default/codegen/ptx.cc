@@ -61,7 +61,7 @@ std::string GetFileName(Operation *op) {
 std::vector<int> GetIntArrayAttr(ArrayAttr arr) {
   std::vector<int> res;
   for (auto attr : arr) {
-    if (auto i_attr = attr.dyn_cast<IntegerAttr>()) {
+    if (auto i_attr = dyn_cast<IntegerAttr>(attr)) {
       res.push_back(i_attr.getInt());
     }
   }
@@ -111,8 +111,15 @@ PTXOpKernel::PTXOpKernel(const OpKernelInfo &info)
           ->getAttrOfType<StringAttr>(KERNEL_NAME_ATTR)
           .getValue()
           .str();
-  impl_->kernel_info.file_name = brt::ir::GetParentPath(info.GetIRPath()) +
-                                 "/" + GetFileName(info.GetOperation());
+
+  auto fileName = info.GetOperation()
+                      ->getAttrOfType<StringAttr>(FILE_NAME_ATTR)
+                      .getValue()
+                      .str();
+
+  impl_->kernel_info.file_name =
+      brt::ir::GetParentPath(info.GetIRPath()) + "/" + fileName;
+
   if (info.GetOperation()->hasAttrOfType<StringAttr>(CALL_CONVENTION_ATTR))
     impl_->call_convention =
         info.GetOperation()
@@ -221,7 +228,8 @@ common::Status PTXOpKernel::RunImpl(const ExecutionContext &ctx) {
   CUfunction func = impl_->GetOrCreateFunction(cuda_env.GetDeviceID());
 
   return work_queue->AddTask(5 /*CUDATaskType::kComputeDrv*/, (void *)func,
-                             args.data());
+                             args.data(), info_.GetOpId(),
+                             info_.GetDependency());
 }
 } // namespace cuda
 } // namespace brt

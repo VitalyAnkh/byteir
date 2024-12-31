@@ -71,6 +71,8 @@ inline DTypeEnum ConvertMLIRTypeToDType(mlir::Type elementType) {
     return DTypeEnum::Bool;
   } else if (IsByreStringType(elementType)) {
     return DTypeEnum::StringView;
+  } else if (elementType.isTF32()) {
+    return DTypeEnum::TF32;
   }
   return DTypeEnum::Unsupported;
 }
@@ -101,6 +103,8 @@ inline mlir::Type ConvertDTypeToMLIRType(DTypeEnum dtype,
     return mlir::FloatType::getF16(context);
   case DTypeEnum::BFloat16:
     return mlir::FloatType::getBF16(context);
+  case DTypeEnum::TF32:
+    return mlir::FloatType::getTF32(context);
   case DTypeEnum::Float64:
     return mlir::FloatType::getF64(context);
   case DTypeEnum::Bool:
@@ -145,8 +149,8 @@ std::optional<std::string> GetSpace(mlir::Value val);
 DTypeEnum GetElementDTypeEnum(mlir::Value val);
 
 template <typename T> inline bool IsElementType(mlir::Value val) {
-  if (auto memref = val.getType().dyn_cast<mlir::MemRefType>()) {
-    return memref.getElementType().isa<T>();
+  if (auto memref = llvm::dyn_cast<mlir::MemRefType>(val.getType())) {
+    return llvm::isa<T>(memref.getElementType());
   }
   return false;
 }

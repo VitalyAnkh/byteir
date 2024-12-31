@@ -1,6 +1,9 @@
-add_mlir_dialect_library(ByteIRSCFPasses
+add_byteir_dialect_library(ByteIRSCFPasses
+  ForallCollapsing.cpp
+  FuseNestedForall.cpp
   InsertTrivialSCFLoop.cpp
   TilingInterfaceToSCFFor.cpp
+  RemoveSingleIterationLoop.cpp
 
   ADDITIONAL_HEADER_DIRS
   ${BYTEIR_SRC_INCLUDE_DIR}/byteir/Dialect/SCF
@@ -18,4 +21,4 @@ add_mlir_dialect_library(ByteIRSCFPasses
   MLIRSCFTransforms
   MLIRSideEffectInterfaces
   MLIRSupport
-  )
+)

@@ -20,8 +20,8 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
-#include "mlir/IR/FunctionInterfaces.h"
 #include "mlir/IR/Value.h"
+#include "mlir/Interfaces/FunctionInterfaces.h"
 
 using namespace mlir;
 
@@ -65,7 +65,7 @@ std::optional<llvm::StringRef> mlir::getLayoutName(mlir::Value val) {
       return defOp->getAttrOfType<StringAttr>(getLayoutAttributeName())
           .getValue();
     }
-  } else if (auto arg = val.dyn_cast<BlockArgument>()) {
+  } else if (auto arg = dyn_cast<BlockArgument>(val)) {
     Region *region = arg.getParentRegion();
     if (region == nullptr)
       return std::nullopt;

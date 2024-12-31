@@ -44,9 +44,10 @@ void mlir::registerSoftmaxInferReturnTypeComponents() {
   static InferReturnTypeComponentsRegistration shapeRegister(
       getSoftmaxName(),
       [](MLIRContext *context, std::optional<Location> loc,
-         ValueShapeRange operands, DictionaryAttr attr, RegionRange,
+         ValueShapeRange operands, DictionaryAttr attr,
+         OpaqueProperties properties, RegionRange,
          SmallVectorImpl<ShapedTypeComponents> &inferredReturnTypes) {
-        ShapedType dataType = operands[0].getType().dyn_cast<ShapedType>();
+        ShapedType dataType = dyn_cast<ShapedType>(operands[0].getType());
         if (!dataType) {
           LLVM_DEBUG(llvm::dbgs() << loc << ": get dataType failed\n");
           return failure();

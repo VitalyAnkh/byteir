@@ -169,14 +169,18 @@ struct ptxGenerator {
       return mlir::failure();
     }
 
-    if (failed(runMLIRPass(moduleOp,
-                           createSerializeToPTXPass(
-                               static_cast<unsigned>(codeGenOpt), libdeviceFile,
-                               nvptxTriple, gpuArch, ptxFeatures, ptxStr),
-                           prefixName + ".gpuptx.mlir",
-                           "createSerializeToPTXPass",
-                           /*saveOutput*/ true,
-                           /*gpuPass*/ true))) {
+    std::string llirPath = "";
+    if (saveTemps)
+      llirPath = prefixName + ".gpukernel.ll";
+
+    if (failed(runMLIRPass(
+            moduleOp,
+            createSerializeToPTXPass(static_cast<unsigned>(codeGenOpt),
+                                     libdeviceFile, nvptxTriple, gpuArch,
+                                     ptxFeatures, ptxStr, llirPath),
+            prefixName + ".gpuptx.mlir", "createSerializeToPTXPass",
+            /*saveOutput*/ true,
+            /*gpuPass*/ true))) {
       return mlir::failure();
     }
 
@@ -244,13 +248,10 @@ struct ptxGenerator {
 
 } // namespace
 
-LogicalResult mlir::translateToPTX(Operation *op, const std::string &prefix,
-                                   OptLevel level, const std::string &gpuArch,
-                                   bool dumpPtx, bool saveTemp, bool verbose) {
-  // only take module
-  auto m = dyn_cast<ModuleOp>(op);
-  if (!m)
-    return failure();
+LogicalResult mlir::translateToPTX(mlir::ModuleOp module,
+                                   const std::string &prefix, OptLevel level,
+                                   const std::string &gpuArch, bool dumpPtx,
+                                   bool saveTemp, bool verbose) {
   ptxGenerator ptxGen(prefix, level, gpuArch, dumpPtx, saveTemp, verbose);
-  return ptxGen.emitOperation(m);
+  return ptxGen.emitOperation(module);
 }

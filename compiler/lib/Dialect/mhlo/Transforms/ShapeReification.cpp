@@ -35,46 +35,6 @@ using namespace mlir;
 using namespace llvm;
 
 namespace {
-
-LogicalResult reifyShapes(OpBuilder &builder, Operation *op,
-                          SmallVectorImpl<Value> &reifications) {
-  if (!op)
-    return failure();
-
-  if (op->hasTrait<hlo::OpTrait::CompatibleOperandsAndResultType>()) {
-    // CompatibleOperandsAndResultType does not implement reify
-    reifications.push_back(
-        builder.create<shape::ShapeOfOp>(op->getLoc(), op->getOperand(0)));
-    return success();
-  }
-
-  // TODO: support nested function call
-  if (auto origin = dyn_cast<InferShapedTypeOpInterface>(op)) {
-    if (failed(origin.reifyReturnTypeShapes(builder, origin->getOperands(),
-                                            reifications))) {
-      return failure();
-    }
-  } else if (auto reifyFunc =
-                 reifyReturnTypeShapes(op->getName().getStringRef())) {
-    if (failed(reifyFunc(op, builder, op->getOperands(), reifications))) {
-      return failure();
-    }
-  } else if (auto customCall = dyn_cast<mhlo::CustomCallOp>(op)) {
-    auto inferFunc = reifyReturnTypeShapes(customCall.getCallTargetName());
-    if (!inferFunc) {
-      return failure();
-    }
-    if (failed(inferFunc(op, builder, op->getOperands(), reifications)))
-      return failure();
-  } else {
-    // Return failure if op doesn't have InferShapedTypeOpInterface and not
-    // registered.
-    return failure();
-  }
-
-  return success();
-}
-
 struct ShapeReificationOnTensorDimPattern
     : public OpRewritePattern<tensor::DimOp> {
   explicit ShapeReificationOnTensorDimPattern(MLIRContext *ctx)
@@ -93,7 +53,7 @@ struct ShapeReificationOnTensorDimPattern
     }
 
     Value shape =
-        reifications[op.getSource().cast<OpResult>().getResultNumber()];
+        reifications[cast<OpResult>(op.getSource()).getResultNumber()];
     Value dimOfShape =
         rewriter.create<tensor::ExtractOp>(op.getLoc(), shape, op.getIndex());
 
@@ -123,7 +83,7 @@ struct ShapeReificationPattern : public OpRewritePattern<shape::ShapeOfOp> {
       return failure();
     }
 
-    Value shape = reifications[op.getArg().cast<OpResult>().getResultNumber()];
+    Value shape = reifications[cast<OpResult>(op.getArg()).getResultNumber()];
     // Insert cast, if needed.
     if (shape.getType() != op.getType()) {
       shape = rewriter.create<tensor::CastOp>(op.getLoc(), op.getType(), shape);
@@ -157,6 +117,8 @@ struct ShapeReificationPass
     MLIRContext *ctx = &getContext();
     RewritePatternSet patterns(ctx);
     PopulateShapeReificationPatterns(ctx, patterns);
+    // populate `shape_of` => `const_shape` folding pattern
+    shape::ShapeOfOp::getCanonicalizationPatterns(patterns, ctx);
 
     // Apply patterns from the bottom up. This ensures to need no more than one
     // iteration.

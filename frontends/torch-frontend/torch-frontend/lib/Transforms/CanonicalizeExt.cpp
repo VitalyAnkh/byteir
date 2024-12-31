@@ -16,6 +16,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "torch-frontend/Transforms/CanonicalizeExt.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "stablehlo/dialect/StablehloOps.h"
@@ -31,18 +32,16 @@ LogicalResult foldConstantConvertOp(stablehlo::ConvertOp op,
           op.getOperand().getDefiningOp())) {
     return failure();
   }
-  DenseElementsAttr valueAttr = op.getOperand()
-                                    .getDefiningOp<stablehlo::ConstantOp>()
-                                    .getValue()
-                                    .cast<DenseElementsAttr>();
+  DenseElementsAttr valueAttr = cast<DenseElementsAttr>(
+      op.getOperand().getDefiningOp<stablehlo::ConstantOp>().getValue());
   Type inputElementType = valueAttr.getType().getElementType();
   Type outputElementType =
-      op.getResult().getType().cast<ShapedType>().getElementType();
+      cast<ShapedType>(op.getResult().getType()).getElementType();
   auto getWidth = [](Type type) -> int64_t {
-    if (type.isa<FloatType>()) {
-      return type.cast<FloatType>().getWidth();
-    } else if (type.isa<IntegerType>()) {
-      return type.cast<IntegerType>().getWidth();
+    if (isa<FloatType>(type)) {
+      return cast<FloatType>(type).getWidth();
+    } else if (isa<IntegerType>(type)) {
+      return cast<IntegerType>(type).getWidth();
     } else {
       return -1;
     }
@@ -59,6 +58,19 @@ LogicalResult foldConstantConvertOp(stablehlo::ConvertOp op,
       rewriter.create<stablehlo::ConstantOp>(op->getLoc(), newValueAttr);
   rewriter.replaceOp(op, newConstantOp.getOutput());
   return success();
+}
+
+LogicalResult replaceArithConstantOpWithStablehlo(arith::ConstantOp op,
+                                                  PatternRewriter &rewriter) {
+  if (auto attr = llvm::dyn_cast<DenseElementsAttr>(op.getValue())) {
+    if (llvm::isa<mlir::IndexType>(attr.getType().getElementType())) {
+      // stablehlo constant doesn't support index type
+      return failure();
+    }
+    rewriter.replaceOpWithNewOp<stablehlo::ConstantOp>(op, attr);
+    return success();
+  }
+  return failure();
 }
 
 namespace {
@@ -85,6 +97,8 @@ struct CanonicalizeExtPass : public CanonicalizeExtBase<CanonicalizeExtPass> {
 
     // Add conditional canonicalizer too
     owningPatterns.add(foldConstantConvertOp);
+    // remove it if torch-to-stablehlo doesn't involve arith dialect
+    owningPatterns.add(replaceArithConstantOpWithStablehlo);
 
     patterns = FrozenRewritePatternSet(std::move(owningPatterns),
                                        disabledPatterns, enabledPatterns);

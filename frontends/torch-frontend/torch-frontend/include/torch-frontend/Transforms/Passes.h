@@ -22,7 +22,7 @@
 #include "torch-frontend/Transforms/CanonicalizeExt.h"
 #include "torch-frontend/Transforms/EliminateUselessOp.h"
 #include "torch-frontend/Transforms/RewriteCustomOp.h"
-#include "torch-frontend/Transforms/RewriteToByteIREntryPoint.h"
+#include "torch-frontend/Transforms/RewriteEntryFuncName.h"
 #include "torch-frontend/Transforms/UnpackPublicFunctionReturn.h"
 
 namespace mlir {

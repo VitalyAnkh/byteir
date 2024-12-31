@@ -27,26 +27,15 @@ using namespace mlir;
 using namespace mlir::byre;
 
 namespace {
-void createByreHostPipelineImpl(OpPassManager &pm, const std::string &entryFunc,
-                                const std::string &deviceFile,
-                                const std::string &target) {
+void createByreHostPipelineImpl(OpPassManager &pm,
+                                const std::string &entryFunc) {
   pm.addPass(createCollectFuncPass(
       byre::ByreDialect::getEntryPointFunctionAttrName()));
-
-  std::string stringAttr = "device_file_name:String:" + deviceFile;
-  pm.addPass(createFuncTagPass(/*anchorTag=*/"", stringAttr, entryFunc));
-
-  // currently use SetOpSpace + SetArgSpace to specify space here
-  // TODO: later move to GPUOpt after general copy finish
-  if (!target.empty()) {
-    pm.addNestedPass<func::FuncOp>(createSetOpSpacePass(entryFunc, target));
-    pm.addPass(createSetArgSpacePass(entryFunc, target, true));
-  }
 }
 } // namespace
 
 void mlir::createByreHostPipeline(OpPassManager &pm,
                                   const ByreHostPipelineOptions &options) {
-  invokeOpPassPipelineBuilder(createByreHostPipelineImpl, pm, options.entryFunc,
-                              options.deviceFile, options.target);
+  invokeOpPassPipelineBuilder(createByreHostPipelineImpl, pm,
+                              options.entryFunc);
 }

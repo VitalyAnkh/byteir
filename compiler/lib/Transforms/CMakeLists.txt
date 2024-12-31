@@ -1,5 +1,6 @@
 add_mlir_library(ByteIRTransforms
   AnchoredPipeline.cpp
+  ApplyPDLPatterns.cpp
   Bufferize.cpp
   TryCatchModulePipeline.cpp
   CanonicalizeExt.cpp
@@ -13,10 +14,12 @@ add_mlir_library(ByteIRTransforms
   LoopTag.cpp
   LoopUnroll.cpp
   MemoryPlanning.cpp
+  ModuleTag.cpp
   RemoveFuncBody.cpp
   RewriteOpToStdCall.cpp
   SetArgShape.cpp
   SetSpace.cpp
+  ShapeFuncOutlining.cpp
   Utils.cpp
 
   ADDITIONAL_HEADER_DIRS
@@ -28,6 +31,7 @@ add_mlir_library(ByteIRTransforms
   ByteIRTensorPasses
   ByteIRTransformsPassIncGen
   ByteIRUtils
+  MLIRSCFDialect
 
   LINK_LIBS PUBLIC
   ByteIRAnalysis
@@ -36,9 +40,12 @@ add_mlir_library(ByteIRTransforms
   ByteIRTensorPasses
   ByteIRVectorPasses
   ByteIRUtils
+  ByteIRCclPasses
   MLIRIR
   MLIRAffineDialect
   MLIRMemRefDialect
+  MLIRPDLDialect
+  MLIRPDLInterpDialect
   MLIRSCFDialect
   MLIRTransforms
 )

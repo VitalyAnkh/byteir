@@ -19,9 +19,11 @@
 
 #include "byteir/Conversion/ToGPU/ToGPU.h"
 #include "byteir/Conversion/ToLLVM/ToLLVM.h"
+#include "byteir/Dialect/GPU/Transforms/Utils.h"
 #include "byteir/Dialect/Linalg/TransformOps/LinalgExtTransformOps.h"
 #include "byteir/Dialect/Transform/IR/TransformExtOps.h"
 #include "byteir/Dialect/Transform/Transforms/TransformInsertion.h"
+#include "byteir/Dialect/Vector/Transforms/MoveForallRegionIntoWarpOp.h"
 #include "byteir/Pipelines/Common/Utils.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Bufferization/TransformOps/BufferizationTransformOps.h"
@@ -32,6 +34,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/SCF/TransformOps/SCFTransformOps.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Vector/TransformOps/VectorTransformOps.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/ADT/SmallSet.h"
 
@@ -45,28 +48,20 @@ namespace {
 //----------------------------------------------------------------------------//
 // TODO: move to common header
 
+static constexpr int64_t kGridSplitThreshold = 4096;
+static constexpr int64_t kGridTileNumThreshold = 64;
+static constexpr int64_t kThreadUnrollThreshold = 8;
+
 constexpr bool isPowerOf2(int64_t n) { return (!(n & (n - 1))); }
 
 constexpr int64_t nextPowerOf2(int64_t n) {
   return (n <= 1) ? 1 : (isPowerOf2(n) ? n : (2 * nextPowerOf2((n + 1) / 2)));
 }
 
-bool isMappedToGPUBlocks(scf::ForOp forOp) {
-  if (auto loopToSIMTAttr =
-          forOp->getAttrOfType<StringAttr>(getLoopToSIMTAttrName())) {
-    auto mappingTo = loopToSIMTAttr.getValue();
-    if (mappingTo == getBlockIdXName() || mappingTo == getBlockIdYName() ||
-        mappingTo == getBlockIdZName()) {
-      return true;
-    }
-  }
-  return false;
-}
-
-bool isMappedToGPUBlocks(scf::ForallOp forallOp) {
+bool isMappedToGPUWarps(scf::ForallOp forallOp) {
   if (auto mapping = forallOp.getMappingAttr()) {
     if (llvm::any_of(mapping.getValue(), [](Attribute attr) {
-          return isa<gpu::GPUBlockMappingAttr>(attr);
+          return isa<gpu::GPUWarpMappingAttr>(attr);
         })) {
       return true;
     }
@@ -75,46 +70,9 @@ bool isMappedToGPUBlocks(scf::ForallOp forallOp) {
   return false;
 }
 
-bool isMappedToGPUBlocks(Operation *op) {
-  if (auto forOp = llvm::dyn_cast_or_null<scf::ForOp>(op)) {
-    return isMappedToGPUBlocks(forOp);
-  }
+bool isMappedToGPUWarps(Operation *op) {
   if (auto forallOp = llvm::dyn_cast_or_null<scf::ForallOp>(op)) {
-    return isMappedToGPUBlocks(forallOp);
-  }
-  return false;
-}
-
-bool isMappedToGPUThreads(scf::ForOp forOp) {
-  if (auto loopToSIMTAttr =
-          forOp->getAttrOfType<StringAttr>(getLoopToSIMTAttrName())) {
-    auto mappingTo = loopToSIMTAttr.getValue();
-    if (mappingTo == getThreadIdXName() || mappingTo == getThreadIdYName() ||
-        mappingTo == getThreadIdZName()) {
-      return true;
-    }
-  }
-  return false;
-}
-
-bool isMappedToGPUThreads(scf::ForallOp forallOp) {
-  if (auto mapping = forallOp.getMappingAttr()) {
-    if (llvm::any_of(mapping.getValue(), [](Attribute attr) {
-          return isa<gpu::GPUThreadMappingAttr>(attr);
-        })) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-bool isMappedToGPUThreads(Operation *op) {
-  if (auto forOp = llvm::dyn_cast_or_null<scf::ForOp>(op)) {
-    return isMappedToGPUThreads(forOp);
-  }
-  if (auto forallOp = llvm::dyn_cast_or_null<scf::ForallOp>(op)) {
-    return isMappedToGPUThreads(forallOp);
+    return isMappedToGPUWarps(forallOp);
   }
   return false;
 }
@@ -133,6 +91,23 @@ std::optional<int64_t> getReductionDim(linalg::GenericOp genericOp) {
   return std::nullopt;
 }
 
+int64_t getParallelism(linalg::GenericOp genericOp) {
+  SmallVector<unsigned> parallelDims;
+  genericOp.getParallelDims(parallelDims);
+  auto staticLoopRanges = genericOp.getStaticLoopRanges();
+  if (parallelDims.size() == 0) {
+    return 1;
+  }
+  int64_t parallelism = 1;
+  for (auto idx : parallelDims) {
+    if (ShapedType::isDynamic(staticLoopRanges[idx])) {
+      return ShapedType::kDynamic;
+    }
+    parallelism *= staticLoopRanges[idx];
+  }
+  return parallelism;
+}
+
 std::optional<int64_t> getOperandReductionDim(OpOperand &operand) {
   auto genericOp = llvm::dyn_cast<linalg::GenericOp>(operand.getOwner());
   if (!genericOp)
@@ -147,7 +122,7 @@ std::optional<int64_t> getOperandReductionDim(OpOperand &operand) {
     return std::nullopt;
 
   for (auto &&en : llvm::enumerate(affineMap.getResults())) {
-    if (auto dimExpr = en.value().dyn_cast<AffineDimExpr>()) {
+    if (auto dimExpr = dyn_cast<AffineDimExpr>(en.value())) {
       if (dimExpr.getPosition() == *dim) {
         return en.index();
       }
@@ -160,7 +135,7 @@ std::optional<int64_t> getOperandReductionDim(OpOperand &operand) {
 SmallVector<int64_t> getDynamicDims(linalg::GenericOp genericOp) {
   auto staticLoopRanges = genericOp.getStaticLoopRanges();
   SmallVector<int64_t> ret;
-  for (int64_t i = 0; i < staticLoopRanges.size(); ++i) {
+  for (size_t i = 0; i < staticLoopRanges.size(); ++i) {
     if (ShapedType::isDynamic(staticLoopRanges[i])) {
       ret.push_back(i);
     }
@@ -168,14 +143,45 @@ SmallVector<int64_t> getDynamicDims(linalg::GenericOp genericOp) {
   return ret;
 }
 
+static void promoteAllTensorsWithinOp(ImplicitLocOpBuilder &b, Value parentOp,
+                                      gpu::AddressSpaceAttr memAddrSpace) {
+  // get corresponding empty tensor
+  auto emptyTensorType = transform::OperationType::get(
+      b.getContext(), tensor::EmptyOp::getOperationName());
+  auto emptyTensor = b.create<transform::MatchOp>(
+      emptyTensorType, parentOp, tensor::EmptyOp::getOperationName());
+
+  // // empty tensor to alloc tensor
+  auto allocTensorType = transform::OperationType::get(
+      b.getContext(), bufferization::AllocTensorOp::getOperationName());
+  auto allocTensor = b.create<transform::EmptyTensorToAllocTensorOp>(
+      allocTensorType, emptyTensor);
+  auto memorySpaceAttrName =
+      bufferization::AllocTensorOp::getMemorySpaceAttrName(OperationName(
+          bufferization::AllocTensorOp::getOperationName(), b.getContext()));
+
+  Value paramV = b.create<transform::ParamConstantOp>(
+      /* type */ pdl::AttributeType::get(b.getContext()),
+      /* value */ memAddrSpace);
+  b.create<transform::AnnotateOp>(
+      /* target */ allocTensor,
+      /* name */ memorySpaceAttrName,
+      /* param */ paramV);
+}
+
 //----------------------------------------------------------------------------//
 // configuration structs
 //----------------------------------------------------------------------------//
 
+// tag for linalg operation
 static constexpr StringLiteral kGridReduction = "__grid_reduction__";
 static constexpr StringLiteral kBlockReduction = "__block_reduction__";
 static constexpr StringLiteral kWarpReduction = "__warp_reduction__";
 static constexpr StringLiteral kThreadReduction = "__thread_reduction__";
+
+// tag for forall operation
+static constexpr StringLiteral kMapInnerLinalgReductionDimToThread =
+    "__map_inner_linalg_reduction_dim_to_thread__";
 
 struct ProducerSelector {
   uint64_t operandNumber;
@@ -220,17 +226,22 @@ struct ProducerSelector {
 
 struct GridSplitConfig {
   int64_t splitFactor;
-  int64_t dimension;
+  int64_t redDim;
+  int64_t numLoops;
+  gpu::MappingId mapping;
 
   void apply(ImplicitLocOpBuilder &b, Value pdlV);
 };
 
 struct GridTileConfig {
   SmallVector<int64_t> tileSizes;
-  SmallVector<gpu::Blocks> mapping;
+  SmallVector<gpu::MappingId> mapping;
   std::vector<ProducerSelector> fuseCandidates;
+  int64_t parallelismPerBlock;
+  bool asNumThreads;
+  bool mapReductionDimToThread;
 
-  void apply(ImplicitLocOpBuilder &b, Value pdlV, bool usingForall);
+  void apply(ImplicitLocOpBuilder &b, Value pdlV);
 };
 
 struct BlockSplitConfig {
@@ -243,16 +254,21 @@ struct BlockSplitConfig {
 };
 
 struct BlockTileConfig {
+  bool usingTileReduction;
+  bool mappingToWarp;
+  int64_t numLoops;
+  int64_t redDim;
   SmallVector<int64_t> tileSizes;
-  SmallVector<gpu::Threads> mapping;
+  SmallVector<gpu::MappingId> mapping;
   std::vector<ProducerSelector> fuseCandidates;
 
-  void apply(ImplicitLocOpBuilder &b, Value pdlV, bool usingForall);
+  void apply(ImplicitLocOpBuilder &b, Value pdlV);
 };
 
 struct ThreadTileConfig {
-  SmallVector<int64_t> parallelTileSizes;
-  SmallVector<int64_t> reductionTileSizes;
+  bool applyLoopUnroll;
+  utils::IteratorType iterType;
+  SmallVector<int64_t> tileSizes;
   SmallVector<int64_t> unrollFactors;
   std::vector<ProducerSelector> initOperands;
 
@@ -276,24 +292,60 @@ void processProducerSelectors(
   }
 }
 
-void tileToForallAndFuseImpl(
-    ImplicitLocOpBuilder &b, Value toTile,
-    const SmallVector<int64_t> &tileSizes,
-    const SmallVector<Attribute> &mapping,
-    const std::vector<ProducerSelector> &fuseCandidates) {
+transform::TileUsingForallOp
+tileToForallAndFuseImpl(ImplicitLocOpBuilder &b, Value toTile,
+                        const SmallVector<int64_t> &tileSizes,
+                        const SmallVector<Attribute> &mapping,
+                        const std::vector<ProducerSelector> &fuseCandidates,
+                        bool asNumThreads) {
   SmallVector<Value> toBeFused;
   processProducerSelectors(b, fuseCandidates, toTile, toBeFused);
 
-  auto tileOp = b.create<transform::TileToForallOp>(
-      /* target */ toTile,
-      /* staticTileSizes */ tileSizes,
-      /* ctor tag */ transform::TileSizesSpec(),
-      /* mapping */ b.getArrayAttr(mapping));
+  transform::TileUsingForallOp tileOp;
+  if (asNumThreads) {
+    tileOp = b.create<transform::TileUsingForallOp>(
+        /* target */ toTile,
+        /* numThreads */ tileSizes,
+        /* ctor tag */ transform::NumThreadsSpec(),
+        /* mapping */ b.getArrayAttr(mapping));
+  } else {
+    tileOp = b.create<transform::TileUsingForallOp>(
+        /* target */ toTile,
+        /* staticTileSizes */ tileSizes,
+        /* ctor tag */ transform::TileSizesSpec(),
+        /* mapping */ b.getArrayAttr(mapping));
+  }
   for (auto &&producerOp : toBeFused) {
     b.create<transform::FuseIntoContainingOp>(
         /* producerOp */ producerOp,
         /* containingOp */ tileOp.getForallOp());
   }
+  return tileOp;
+}
+
+void tileReductionToForallAndFuseImpl(ImplicitLocOpBuilder &b, Value toTile,
+                                      const SmallVector<int64_t> &numThreads,
+                                      const Attribute mapping,
+                                      StringRef annotation) {
+  auto tileReductionOp = b.create<transform::TileReductionUsingForallOp>(
+      /* target */ toTile,
+      /* num_threads */ numThreads,
+      /*staticTileSizes*/ SmallVector<int64_t>{},
+      /*mapping*/ b.getArrayAttr(mapping));
+
+  b.create<transform::AnnotateOp>(
+      /* target */ tileReductionOp.getSplitLinalgOp(),
+      /* name */ annotation,
+      /* param */ Value());
+
+  b.create<transform::AnnotateOp>(
+      /* target */ tileReductionOp.getCombiningLinalgOp(),
+      /* name */ annotation,
+      /* param */ Value());
+
+  b.create<transform::FuseIntoContainingOp>(
+      /* producerOp */ tileReductionOp.getFillOp()[0],
+      /* containingOp */ tileReductionOp.getForallOp());
 }
 
 void tileToSCFForAndFuseImpl(ImplicitLocOpBuilder &b, Value toTile,
@@ -320,21 +372,13 @@ void tileToSCFForAndFuseImpl(ImplicitLocOpBuilder &b, Value toTile,
 
 void GridSplitConfig::apply(ImplicitLocOpBuilder &b, Value pdlV) {
   if (splitFactor) {
-    auto splitted = b.create<transform::SplitReductionOp>(
-        /* target */ pdlV,
-        /* splitFactor */ splitFactor,
-        /* insertSplitDimension */ dimension,
-        /* innerParallel */ false,
-        /* useScalingAlgorithm */ false,
-        /* useAlloc */ false);
-    b.create<transform::AnnotateOp>(
-        /* target */ splitted.getSplitLinalgOp(),
-        /* name */ kGridReduction,
-        /* param */ Value());
-    b.create<transform::AnnotateOp>(
-        /* target */ splitted.getCombiningLinalgOp(),
-        /* name */ kGridReduction,
-        /* param */ Value());
+    auto mappingAttr = gpu::GPUBlockMappingAttr::get(b.getContext(), mapping);
+
+    SmallVector<int64_t> numThreads(numLoops, 0);
+    numThreads[redDim] = splitFactor;
+
+    tileReductionToForallAndFuseImpl(b, pdlV, numThreads, mappingAttr,
+                                     kGridReduction);
   } else {
     b.create<transform::AnnotateOp>(
         /* target */ pdlV,
@@ -343,36 +387,61 @@ void GridSplitConfig::apply(ImplicitLocOpBuilder &b, Value pdlV) {
   }
 }
 
-void GridTileConfig::apply(ImplicitLocOpBuilder &b, Value pdlV,
-                           bool usingForall) {
-  if (usingForall) {
-    auto mappingAttrs = llvm::to_vector(
-        llvm::map_range(mapping, [&](gpu::Blocks dim) -> Attribute {
-          return gpu::GPUBlockMappingAttr::get(b.getContext(), dim);
-        }));
-    tileToForallAndFuseImpl(b, pdlV, tileSizes, mappingAttrs, fuseCandidates);
-  } else {
-    static constexpr std::array<StringRef, 3> mappings{
-        getBlockIdXName(), getBlockIdYName(), getBlockIdZName()};
-    auto mappingAttrs = llvm::to_vector(
-        llvm::map_range(mapping, [&](gpu::Blocks dim) -> Attribute {
-          return b.getStringAttr(mappings[static_cast<int64_t>(dim)]);
-        }));
-    tileToSCFForAndFuseImpl(b, pdlV, tileSizes, mappingAttrs);
+void GridTileConfig::apply(ImplicitLocOpBuilder &b, Value pdlV) {
+  auto mappingAttrs = llvm::to_vector(
+      llvm::map_range(mapping, [&](gpu::MappingId dim) -> Attribute {
+        return gpu::GPUBlockMappingAttr::get(b.getContext(), dim);
+      }));
+  auto tiledOp =
+      tileToForallAndFuseImpl(b, pdlV, tileSizes, mappingAttrs, fuseCandidates,
+                              /* asNumThreads = */ asNumThreads);
+
+  if (mapReductionDimToThread) {
+    b.create<transform::AnnotateOp>(
+        /* target */ tiledOp.getForallOp(),
+        /* name */ kMapInnerLinalgReductionDimToThread,
+        /* param */ Value());
+  } else if (!asNumThreads && parallelismPerBlock > 1) {
+    SmallVector<int64_t> forTileSizes = tileSizes;
+    for (size_t i = 0; i < forTileSizes.size(); ++i) {
+      if (forTileSizes[i])
+        forTileSizes[i] = 1;
+    }
+
+    auto pdlType = pdl::OperationType::get(b.getContext());
+    auto fuseOp = b.create<transform::FuseOp>(
+        /* transformed */ pdlType,
+        /* loops */
+        SmallVector<Type>(getNumTiledLoops(forTileSizes), pdlType),
+        /* target */ tiledOp.getTiledOp(),
+        /* tile_sizes */ b.getI64ArrayAttr(forTileSizes),
+        /* tile_interchange */ ArrayAttr());
+
+    b.create<transform::ApplyPatternsOp>(
+        fuseOp.getLoops()[0], [](OpBuilder &b, Location loc) {
+          b.create<transform::ApplyCanonicalizationPatternsOp>(loc);
+          b.create<transform::ApplyFoldUnitExtentDimsViaReshapesPatternsOp>(
+              loc);
+        });
+    b.create<transform::AnnotateOp>(
+        /* target */ fuseOp.getTransformed(),
+        /* name */ kBlockReduction,
+        /* param */ Value());
   }
 }
 
 void BlockSplitConfig::apply(ImplicitLocOpBuilder &b, Value pdlV) {
   if (!padDims.empty()) {
     auto padOp = b.create<transform::PadOp>(
-        TypeRange{pdlV.getType(), pdlV.getType()}, pdlV,
+        TypeRange{pdlV.getType(), pdlV.getType(), pdlV.getType()}, pdlV,
         /*padding_values=*/b.getArrayAttr(padValues),
         /*padding_dimensions=*/
         b.getI64ArrayAttr(padDims),
-        /*padToMultipleOf=*/ArrayAttr{},
+        /*pad_to_multiple_of=*/ValueRange{},
+        /*static_pad_to_multiple_of=*/b.getDenseI64ArrayAttr({}),
         /*pack_paddings=*/ArrayAttr{},
         /*transpose_paddings=*/ArrayAttr{},
-        /*copyBack=*/false);
+        /*copy_back_op=*/transform::PadOp::kCopyOpNone);
     pdlV = padOp.getPadded();
   }
   if (!splitFactors.empty()) {
@@ -405,16 +474,20 @@ void BlockSplitConfig::apply(ImplicitLocOpBuilder &b, Value pdlV) {
   auto func = b.create<transform::GetParentOp>(
       pdlV.getType(), pdlV,
       /* isolated_from_above */ true,
+      /* allow_empty_results */ false,
       /* op_name */ b.getStringAttr(func::FuncOp::getOperationName()),
-      /* deduplicate */ false);
+      /* deduplicate */ false,
+      /* nth_parent */ 1);
   b.create<transform::ApplyPatternsOp>(func, [](OpBuilder &b, Location loc) {
     b.create<transform::ApplyCanonicalizationPatternsOp>(loc);
   });
   auto forall = b.create<transform::GetParentOp>(
       pdlV.getType(), pdlV,
       /* isolated_from_above */ false,
+      /* allow_empty_results */ false,
       /* op_name */ b.getStringAttr(scf::ForallOp::getOperationName()),
-      /* deduplicate */ false);
+      /* deduplicate */ false,
+      /* nth_parent */ 1);
   if (!padDims.empty()) {
     auto parallelInsertSliceType = transform::OperationType::get(
         b.getContext(), tensor::ParallelInsertSliceOp::getOperationName());
@@ -446,47 +519,111 @@ void BlockSplitConfig::apply(ImplicitLocOpBuilder &b, Value pdlV) {
       /* param */ paramV);
 }
 
-void BlockTileConfig::apply(ImplicitLocOpBuilder &b, Value pdlV,
-                            bool usingForall) {
-  if (usingForall) {
+void BlockTileConfig::apply(ImplicitLocOpBuilder &b, Value pdlV) {
+
+  if (mappingToWarp) {
+    b.create<transform::AnnotateOp>(
+        /* target */ pdlV,
+        /* name */ kWarpReduction,
+        /* param */ Value());
+  } else {
     auto mappingAttrs = llvm::to_vector(
-        llvm::map_range(mapping, [&](gpu::Threads dim) -> Attribute {
+        llvm::map_range(mapping, [&](gpu::MappingId dim) -> Attribute {
           return gpu::GPUThreadMappingAttr::get(b.getContext(), dim);
         }));
-    tileToForallAndFuseImpl(b, pdlV, tileSizes, mappingAttrs, fuseCandidates);
-  } else {
-    static constexpr std::array<StringRef, 3> mappings{
-        getThreadIdXName(), getThreadIdYName(), getThreadIdZName()};
-    auto mappingAttrs = llvm::to_vector(
-        llvm::map_range(mapping, [&](gpu::Threads dim) -> Attribute {
-          return b.getStringAttr(mappings[static_cast<int64_t>(dim)]);
-        }));
-    tileToSCFForAndFuseImpl(b, pdlV, tileSizes, mappingAttrs);
+    if (usingTileReduction) {
+      SmallVector<int64_t> numThreads = tileSizes;
+      SmallVector<int64_t> staticTileSizes = llvm::to_vector(llvm::map_range(
+          tileSizes, [](int64_t val) -> int64_t { return val != 0; }));
+
+      auto tiledRedutionOp = b.create<transform::TileReductionUsingForallOp>(
+          /* target */ pdlV,
+          /* num_threads */ numThreads,
+          /*staticTileSizes*/ staticTileSizes,
+          /*mapping*/ b.getArrayAttr(mappingAttrs));
+
+      b.create<transform::FuseIntoContainingOp>(
+          /* producerOp */ tiledRedutionOp.getFillOp()[0],
+          /* containingOp */ tiledRedutionOp.getForallOp());
+
+      // attch block_redution to combineOp
+      b.create<transform::AnnotateOp>(
+          /* target */ tiledRedutionOp.getCombiningLinalgOp(),
+          /* name */ kBlockReduction,
+          /* param */ Value());
+
+      if (numLoops > 1) {
+        SmallVector<int64_t> combineTileSizes(numLoops, 1);
+        // excluding reduction dim.
+        combineTileSizes[redDim] = 0;
+        auto tileCombineOp = b.create<transform::TileUsingForOp>(
+            /* target */ tiledRedutionOp.getCombiningLinalgOp(),
+            /* staticTileSizes */ combineTileSizes);
+
+        b.create<transform::ApplyPatternsOp>(
+            tileCombineOp.getLoops()[0], [](OpBuilder &b, Location loc) {
+              b.create<transform::ApplyCanonicalizationPatternsOp>(loc);
+              b.create<transform::ApplyFoldUnitExtentDimsViaReshapesPatternsOp>(
+                  loc);
+            });
+
+        b.create<transform::AnnotateOp>(
+            /* target */ tileCombineOp.getTiledLinalgOp(),
+            /* name */ kBlockReduction,
+            /* param */ Value());
+      }
+
+      {
+        // get corresponding empty tensor
+        auto forall = b.create<transform::GetParentOp>(
+            tiledRedutionOp.getForallOp().getType(),
+            tiledRedutionOp.getForallOp(),
+            /* isolated_from_above */ false,
+            /* allow_empty_results */ false,
+            /* op_name */ b.getStringAttr(scf::ForallOp::getOperationName()),
+            /* deduplicate */ false,
+            /* nth_parent */ 1);
+        auto workgroupMemoryAddressSpace = gpu::AddressSpaceAttr::get(
+            b.getContext(), gpu::GPUDialect::getWorkgroupAddressSpace());
+
+        promoteAllTensorsWithinOp(b, forall, workgroupMemoryAddressSpace);
+      }
+    } else {
+      auto tiledOp =
+          tileToForallAndFuseImpl(b, pdlV, tileSizes, mappingAttrs,
+                                  fuseCandidates, /* asNumThreads = */ false);
+    }
   }
 }
 
 void ThreadTileConfig::apply(ImplicitLocOpBuilder &b, Value pdlV) {
   auto pdlType = pdl::OperationType::get(b.getContext());
-  auto numTiledParallelLoops = getNumTiledLoops(parallelTileSizes);
+  auto numTiledParallelLoops = getNumTiledLoops(tileSizes);
   SmallVector<Value> loops;
-  if (numTiledParallelLoops > 0) {
+  if (iterType == utils::IteratorType::parallel) {
     auto fuseOp = b.create<transform::FuseOp>(
         /* transformed */ pdlType,
         /* loops */
-        SmallVector<Type>(getNumTiledLoops(parallelTileSizes), pdlType),
+        SmallVector<Type>(numTiledParallelLoops, pdlType),
         /* target */ pdlV,
-        /* tile_sizes */ b.getI64ArrayAttr(parallelTileSizes),
+        /* tile_sizes */ b.getI64ArrayAttr(tileSizes),
         /* tile_interchange */ ArrayAttr());
     loops = fuseOp.getLoops();
     pdlV = fuseOp.getTransformed();
+  } else {
+    auto tileOp = b.create<transform::TileUsingForOp>(
+        /* target */ pdlV,
+        /* tileSizes */ tileSizes);
+    for (auto loop : tileOp.getLoops()) {
+      loops.emplace_back(loop);
+    }
   }
 
-  auto tileOp = b.create<transform::TileOp>(
-      /* target */ pdlV,
-      /* tillSizes */ reductionTileSizes);
-  loops.push_back(tileOp.getLoops()[0]);
-  for (auto &&[loop, factor] : llvm::reverse(llvm::zip(loops, unrollFactors))) {
-    b.create<transform::LoopUnrollOp>(loop, factor);
+  if (applyLoopUnroll) {
+    for (auto &&[loop, factor] :
+         llvm::reverse(llvm::zip(loops, unrollFactors))) {
+      b.create<transform::LoopUnrollOp>(loop, factor);
+    }
   }
 }
 
@@ -499,11 +636,33 @@ bool isReductionOp(linalg::GenericOp genericOp) {
     return false;
 
   if (!llvm::all_of(genericOp.getIndexingMapsArray(), [](AffineMap affineMap) {
-        return affineMap.isProjectedPermutation(/* allowZeroInResults */ false);
+        return affineMap.isProjectedPermutation(
+            /* allowZeroInResults */ false);
       }))
     return false;
 
   return true;
+}
+
+bool isRedDimInInnermostLoop(linalg::GenericOp genericOp) {
+  if (!isReductionOp(genericOp))
+    return false;
+  int64_t numLoops = genericOp.getNumLoops();
+  auto maybeRedDim = getReductionDim(genericOp);
+  if (!maybeRedDim.has_value()) {
+    return false;
+  }
+  int64_t redDim = maybeRedDim.value();
+  for (auto &&affineMap : genericOp.getIndexingMapsArray()) {
+    if (affineMap.isPermutation()) {
+      auto dim = affineMap.getDimPosition(numLoops - 1);
+      if (dim == redDim) {
+        return true;
+      }
+      break;
+    }
+  }
+  return false;
 }
 
 bool isGridReductionOp(linalg::GenericOp genericOp) {
@@ -536,6 +695,32 @@ bool isBlockReductionOp(linalg::GenericOp genericOp) {
   return false;
 }
 
+bool isMappedReductionToThread(linalg::GenericOp genericOp) {
+  if (!isReductionOp(genericOp))
+    return false;
+
+  if (auto forallOp =
+          llvm::dyn_cast_or_null<scf::ForallOp>(genericOp->getParentOp())) {
+    return forallOp->hasAttr(kMapInnerLinalgReductionDimToThread);
+  }
+  return false;
+}
+
+bool isWarpReductionOp(linalg::GenericOp genericOp) {
+  if (!isReductionOp(genericOp))
+    return false;
+
+  // early return for manual tag
+  if (genericOp->hasAttr(kWarpReduction))
+    return true;
+
+  // nested in op which is mapped to GPU warp
+  if (isMappedToGPUWarps(genericOp->getParentOp()))
+    return true;
+
+  return false;
+}
+
 bool isThreadReductionOp(linalg::GenericOp genericOp) {
   if (!isReductionOp(genericOp))
     return false;
@@ -543,6 +728,10 @@ bool isThreadReductionOp(linalg::GenericOp genericOp) {
   // early return for manual tag
   if (genericOp->hasAttr(kThreadReduction))
     return true;
+
+  if (auto forallOp = genericOp->getParentOfType<scf::ForallOp>()) {
+    return isMappedToGPUThreads(forallOp);
+  }
 
   // nested in op which is mapped to GPU threads
   if (isMappedToGPUThreads(genericOp->getParentOp()))
@@ -556,14 +745,33 @@ std::optional<GridSplitConfig> getGridSplitConfig(linalg::GenericOp genericOp,
   if (!isGridReductionOp(genericOp))
     return std::nullopt;
 
+  int64_t numLoops = genericOp.getNumLoops();
   auto redDim = *getReductionDim(genericOp);
   auto staticLoopRanges = genericOp.getStaticLoopRanges();
-  if (ShapedType::isDynamic(staticLoopRanges[redDim]) ||
-      staticLoopRanges[redDim] % splitFactor != 0 ||
-      staticLoopRanges[redDim] <= 1024)
-    return std::nullopt;
+  int64_t parallelism = getParallelism(genericOp);
 
-  return GridSplitConfig{splitFactor, redDim ? redDim - 1 : redDim};
+  if (parallelism > 1 || parallelism == ShapedType::kDynamic) {
+    return std::nullopt;
+  }
+
+  if (!isRedDimInInnermostLoop(genericOp)) {
+    return std::nullopt;
+  }
+
+  int64_t redDimSize = staticLoopRanges[redDim];
+  if (isRedDimInInnermostLoop(genericOp)) {
+    if (ShapedType::isDynamic(redDimSize) ||
+        staticLoopRanges[redDim] <= kGridSplitThreshold) {
+      return std::nullopt;
+    }
+  }
+
+  // at least 2:  split reduction & grid tile
+  int64_t blockMappingNum = std::max(numLoops, static_cast<int64_t>(2));
+  return GridSplitConfig{splitFactor, redDim, numLoops,
+                         static_cast<gpu::MappingId>(
+                             static_cast<int64_t>(gpu::MappingId::LinearDim0) +
+                             blockMappingNum - 1)};
 }
 
 std::optional<GridTileConfig> getGridTileConfig(linalg::GenericOp genericOp,
@@ -574,31 +782,100 @@ std::optional<GridTileConfig> getGridTileConfig(linalg::GenericOp genericOp,
 
   int64_t numLoops = genericOp.getNumLoops();
   SmallVector<int64_t> tileSizes(numLoops, 1);
-  auto loopSizes =
-      cast<linalg::LinalgOp>(genericOp.getOperation()).computeStaticLoopSizes();
+  auto redDim = getReductionDim(genericOp).value();
+  int64_t totalParallelism = getParallelism(genericOp);
+  tileSizes[redDim] = 0;
 
-  for (auto &&affineMap : genericOp.getIndexingMapsArray()) {
-    if (affineMap.isPermutation()) {
-      auto dim = affineMap.getDimPosition(numLoops - 1);
-      if (loopSizes[dim] > warpSize) { // TODO: padding
-        tileSizes[dim] *= warpSize;
-        break;
+  bool asNumThreads = false;
+  bool mapReductionDimToThread = true;
+  auto loopSizes =
+      cast<linalg::LinalgOp>(genericOp.getOperation()).getStaticLoopRanges();
+
+  int64_t parallelismPerBlock = blockSize;
+  int64_t redDimSize = loopSizes[redDim];
+
+  if (isRedDimInInnermostLoop(genericOp)) {
+    if (!ShapedType::isDynamic(redDimSize) && redDimSize < warpSize &&
+        totalParallelism / blockSize >= kGridTileNumThreshold) {
+      parallelismPerBlock = blockSize;
+      mapReductionDimToThread = true;
+    } else {
+      parallelismPerBlock = 1;
+      mapReductionDimToThread = false;
+    }
+  } else {
+    if (!ShapedType::isDynamic(totalParallelism)) {
+      while (totalParallelism / parallelismPerBlock < kGridTileNumThreshold &&
+             parallelismPerBlock > 1) {
+        parallelismPerBlock /= 2;
       }
     }
   }
 
-  auto redDim = getReductionDim(genericOp).value();
-  tileSizes[redDim] = 0;
+  if (parallelismPerBlock == 1) {
+    mapReductionDimToThread = false;
+  }
+
+  SmallVector<unsigned> parallelDims;
+  genericOp.getParallelDims(parallelDims);
+  int64_t remainParallelism = parallelismPerBlock;
+  int64_t lastTilingDim = -1;
+  for (auto &&affineMap : genericOp.getIndexingMapsArray()) {
+    if (affineMap.isPermutation()) {
+      for (int64_t i = numLoops - 1; i >= 0; --i) {
+        if (remainParallelism == 1) {
+          break;
+        }
+        auto dim = affineMap.getDimPosition(i);
+        if (llvm::find(parallelDims, dim) == parallelDims.end())
+          continue;
+        if (ShapedType::isDynamic(loopSizes[dim])) {
+          tileSizes[dim] = remainParallelism;
+          remainParallelism = 1;
+        } else {
+          int64_t dimSize = nextPowerOf2(loopSizes[dim]);
+          if (dimSize <= remainParallelism) {
+            tileSizes[dim] = 0;
+            remainParallelism /= dimSize;
+          } else {
+            tileSizes[dim] = remainParallelism;
+            remainParallelism = 1;
+          }
+        }
+        lastTilingDim = dim;
+      }
+      break;
+    }
+  }
 
   std::vector<ProducerSelector> fuseCandidates;
-  for (OpOperand *opOperand : genericOp.getDpsInitOperands()) {
-    ProducerSelector::detectFillOperand(opOperand, fuseCandidates);
+  for (OpOperand &opOperand : genericOp.getDpsInitsMutable()) {
+    ProducerSelector::detectFillOperand(&opOperand, fuseCandidates);
   }
 
   auto numTiledLoops = getNumTiledLoops(tileSizes);
+  if (numTiledLoops == 0) {
+    numTiledLoops = 1;
+    if (lastTilingDim != -1) {
+      // parallelism is too small.
+      // using last tiling dimension to generate forallOp with unit mapping
+      // size.
+      tileSizes[lastTilingDim] = loopSizes[lastTilingDim];
+    } else if (genericOp.hasSingleReductionLoop()) {
+      if (ShapedType::isDynamic(loopSizes[redDim])) {
+        asNumThreads = true;
+        tileSizes[redDim] = 1;
+      } else {
+        tileSizes[redDim] = loopSizes[redDim];
+      }
+    } else {
+      return std::nullopt;
+    }
+  }
+
   if (numTiledLoops >= 1 && numTiledLoops <= 3) {
     SmallVector<int64_t> mapping(numLoops, -1);
-    int64_t dimMapping = static_cast<int64_t>(gpu::Blocks::DimX);
+    int64_t dimMapping = static_cast<int64_t>(gpu::MappingId::LinearDim0);
     for (auto &&affineMap : genericOp.getIndexingMapsArray()) {
       if (affineMap.isPermutation()) {
         for (int64_t i = numLoops - 1; i >= 0; i--) {
@@ -618,8 +895,11 @@ std::optional<GridTileConfig> getGridTileConfig(linalg::GenericOp genericOp,
     return GridTileConfig{
         tileSizes,
         llvm::to_vector(llvm::map_range(
-            mapping, [](int64_t i) { return static_cast<gpu::Blocks>(i); })),
-        fuseCandidates};
+            mapping, [](int64_t i) { return static_cast<gpu::MappingId>(i); })),
+        fuseCandidates,
+        parallelismPerBlock,
+        asNumThreads,
+        mapReductionDimToThread};
   }
   return std::nullopt;
 }
@@ -687,35 +967,57 @@ std::optional<BlockTileConfig> getBlockTileConfig(linalg::GenericOp genericOp,
   int64_t numLoops = genericOp.getNumLoops();
   SmallVector<int64_t> tileSizes(numLoops, 0);
   auto loopSizes =
-      cast<linalg::LinalgOp>(genericOp.getOperation()).computeStaticLoopSizes();
+      cast<linalg::LinalgOp>(genericOp.getOperation()).getStaticLoopRanges();
 
   int64_t remainBlockSize = blockSize;
   auto redDim = getReductionDim(genericOp).value();
-  for (int64_t idx = 0; idx < numLoops && remainBlockSize > 1; ++idx) {
-    if (idx == redDim)
-      continue;
-    int64_t curLoopSize2 = nextPowerOf2(loopSizes[idx]);
-    int64_t curBlockSize = std::min(curLoopSize2, remainBlockSize);
-    tileSizes[idx] = curLoopSize2 / curBlockSize;
-    remainBlockSize /= curBlockSize;
-  }
 
-  if (remainBlockSize == blockSize) {
-    tileSizes[redDim] = loopSizes[redDim];
+  bool usingTileReduction = false;
+  bool mappingToWarp = false;
+  // mapping to warp redution directly
+  int64_t redDimSize = loopSizes[redDim];
+  if (numLoops == 1 && redDimSize != ShapedType::kDynamic &&
+      redDimSize <= warpSize && isPowerOf2(redDimSize)) {
+    mappingToWarp = true;
+    return BlockTileConfig{usingTileReduction,
+                           mappingToWarp,
+                           numLoops,
+                           redDim,
+                           tileSizes,
+                           SmallVector<gpu::MappingId>{},
+                           std::vector<ProducerSelector>{}};
+  } else if (isMappedReductionToThread(genericOp)) {
+    for (int64_t i = 0; i < numLoops; ++i)
+      tileSizes[i] = 1;
+    tileSizes[redDim] = 0;
+  } else {
+    usingTileReduction = true;
+    tileSizes[redDim] = blockSize;
+    if (!ShapedType::isDynamic(redDimSize)) {
+      if (redDimSize <= blockSize) {
+        tileSizes[redDim] = std::max(nextPowerOf2(redDimSize), warpSize);
+      }
+
+      while (tileSizes[redDim] * 2 > redDimSize &&
+             tileSizes[redDim] / 2 >= warpSize) {
+        tileSizes[redDim] /= 2;
+      }
+    }
   }
 
   std::vector<ProducerSelector> fuseCandidates;
   for (OpOperand *opOperand : genericOp.getDpsInputOperands()) {
     ProducerSelector::detectPadOperand(opOperand, fuseCandidates);
   }
-  for (OpOperand *opOperand : genericOp.getDpsInitOperands()) {
-    ProducerSelector::detectFillOperand(opOperand, fuseCandidates);
+
+  for (OpOperand &opOperand : genericOp.getDpsInitsMutable()) {
+    ProducerSelector::detectFillOperand(&opOperand, fuseCandidates);
   }
 
   auto numTiledLoops = getNumTiledLoops(tileSizes);
   if (numTiledLoops >= 1 && numTiledLoops <= 3) {
     SmallVector<int64_t> mapping(numLoops, -1);
-    int64_t dimMapping = static_cast<int64_t>(gpu::Threads::DimX);
+    int64_t dimMapping = static_cast<int64_t>(gpu::MappingId::DimX);
     for (auto &&affineMap : genericOp.getIndexingMapsArray()) {
       if (affineMap.isPermutation()) {
         for (int64_t i = numLoops - 1; i >= 0; i--) {
@@ -729,40 +1031,65 @@ std::optional<BlockTileConfig> getBlockTileConfig(linalg::GenericOp genericOp,
     }
     mapping.erase(std::remove(mapping.begin(), mapping.end(), -1),
                   mapping.end());
-    if (mapping.size() != numTiledLoops)
+    if (usingTileReduction && mapping.size() != 1)
+      return std::nullopt;
+
+    if (!usingTileReduction && mapping.size() != numTiledLoops)
       return std::nullopt;
 
     return BlockTileConfig{
+        usingTileReduction,
+        mappingToWarp,
+        numLoops,
+        redDim,
         tileSizes,
         llvm::to_vector(llvm::map_range(
-            mapping, [](int64_t i) { return static_cast<gpu::Threads>(i); })),
+            mapping, [](int64_t i) { return static_cast<gpu::MappingId>(i); })),
         fuseCandidates};
   }
   return std::nullopt;
 }
 
 std::optional<ThreadTileConfig>
-getThreadTileConfig(linalg::GenericOp genericOp) {
+getThreadTileConfig(linalg::GenericOp genericOp,
+                    const utils::IteratorType &iterType) {
   if (!isThreadReductionOp(genericOp))
     return std::nullopt;
 
+  bool applyLoopUnroll = true;
+  SmallVector<int64_t> unrollFactors;
   int64_t numLoops = genericOp.getNumLoops();
-  SmallVector<int64_t> parallelTileSizes(numLoops, 1);
-  SmallVector<int64_t> reductionTileSizes(numLoops, 0);
+  SmallVector<int64_t> tileSizes(numLoops, 0);
   auto reductionDim = *getReductionDim(genericOp);
-
-  parallelTileSizes[reductionDim] = 0;
-  reductionTileSizes[reductionDim] = 1;
-
-  SmallVector<int64_t> unrollFactors =
-      cast<linalg::LinalgOp>(genericOp.getOperation()).computeStaticLoopSizes();
-
-  std::vector<ProducerSelector> initOperands;
-  for (OpOperand *opOperand : genericOp.getDpsInitOperands()) {
-    ProducerSelector::detectFillOperand(opOperand, initOperands);
+  SmallVector<unsigned> dims;
+  if (iterType == utils::IteratorType::parallel) {
+    genericOp.getParallelDims(dims);
+  } else {
+    genericOp.getReductionDims(dims);
   }
 
-  return ThreadTileConfig{parallelTileSizes, reductionTileSizes, unrollFactors,
+  if (dims.size() == 0) {
+    return std::nullopt;
+  }
+
+  SmallVector<int64_t> loopSizes =
+      cast<linalg::LinalgOp>(genericOp.getOperation()).getStaticLoopRanges();
+
+  for (auto d : dims) {
+    tileSizes[d] = 1;
+    unrollFactors.emplace_back(loopSizes[d]);
+    if (ShapedType::isDynamic(loopSizes[d]) ||
+        loopSizes[d] > kThreadUnrollThreshold) {
+      applyLoopUnroll = false;
+    }
+  }
+
+  std::vector<ProducerSelector> initOperands;
+  for (OpOperand &opOperand : genericOp.getDpsInitsMutable()) {
+    ProducerSelector::detectFillOperand(&opOperand, initOperands);
+  }
+
+  return ThreadTileConfig{applyLoopUnroll, iterType, tileSizes, unrollFactors,
                           initOperands};
 }
 
@@ -795,9 +1122,11 @@ void createGPUSplitGridReductionTransformImpl(OpPassManager &pm,
   pm.addPass(createGenericTransformInsertionPass(config));
 }
 
-void createGPUTileGridReductionTransformImpl(
-    OpPassManager &pm, const std::string &anchor, const std::string &prefix,
-    int64_t warpSize, int64_t blockSize, bool usingForall) {
+void createGPUTileGridReductionTransformImpl(OpPassManager &pm,
+                                             const std::string &anchor,
+                                             const std::string &prefix,
+                                             int64_t warpSize,
+                                             int64_t blockSize) {
   TransformInsertionConfig config;
   config.funcAnchor = anchor;
   config.matchPrefix = prefix;
@@ -813,7 +1142,7 @@ void createGPUTileGridReductionTransformImpl(
     auto tileConfig = getGridTileConfig(llvm::cast<linalg::GenericOp>(op),
                                         warpSize, blockSize)
                           .value();
-    tileConfig.apply(b, pdlV, usingForall);
+    tileConfig.apply(b, pdlV);
   };
 
   pm.addPass(createGenericTransformInsertionPass(config));
@@ -845,9 +1174,11 @@ void createGPUSplitBlockReductionTransformImpl(OpPassManager &pm,
   pm.addPass(createGenericTransformInsertionPass(config));
 }
 
-void createGPUTileBlockReductionTransformImpl(
-    OpPassManager &pm, const std::string &anchor, const std::string &prefix,
-    int64_t warpSize, int64_t blockSize, bool usingForall) {
+void createGPUTileBlockReductionTransformImpl(OpPassManager &pm,
+                                              const std::string &anchor,
+                                              const std::string &prefix,
+                                              int64_t warpSize,
+                                              int64_t blockSize) {
   TransformInsertionConfig config;
   config.funcAnchor = anchor;
   config.matchPrefix = prefix;
@@ -866,30 +1197,189 @@ void createGPUTileBlockReductionTransformImpl(
       auto tileConfig = getBlockTileConfig(llvm::cast<linalg::GenericOp>(op),
                                            warpSize, blockSize)
                             .value();
-      tileConfig.apply(b, pdlV, usingForall);
+      tileConfig.apply(b, pdlV);
     } else if (auto copyOp = llvm::dyn_cast_or_null<linalg::CopyOp>(op)) {
-      auto tileOp = b.create<transform::TileToForallOp>(
+      auto tileOp = b.create<transform::TileUsingForallOp>(
           /* target */ pdlV,
           /* staticTileSizes */ SmallVector<int64_t>(1, blockSize),
           /* ctor tag */ transform::NumThreadsSpec(),
           /* mapping */
-          b.getArrayAttr(gpu::GPULinearIdMappingAttr::get(
-              b.getContext(), gpu::LinearId::DimX)));
+          b.getArrayAttr(gpu::GPUThreadMappingAttr::get(
+              b.getContext(), gpu::MappingId::LinearDim0)));
     }
   };
 
   pm.addPass(createGenericTransformInsertionPass(config));
 }
 
-void createGPUTileThreadReductionTransformImpl(OpPassManager &pm,
-                                               const std::string &anchor,
-                                               const std::string &prefix) {
+void createGPUTileSplitWarpReductionTransformImpl(OpPassManager &pm,
+                                                  const std::string &anchor,
+                                                  const std::string &prefix,
+                                                  int64_t blockSize,
+                                                  int64_t warpSize) {
   TransformInsertionConfig config;
   config.funcAnchor = anchor;
   config.matchPrefix = prefix;
   config.opFilter = [=](Operation *op) {
     if (auto genericOp = llvm::dyn_cast_or_null<linalg::GenericOp>(op)) {
-      return getThreadTileConfig(genericOp).has_value();
+      if (isBlockReductionOp(genericOp)) {
+        int64_t numLoops = genericOp.getNumLoops();
+        int64_t redDim = -1;
+        SmallVector<unsigned> reductionDims;
+        genericOp.getReductionDims(reductionDims);
+        if (reductionDims.size() == 1) {
+          redDim = reductionDims[0];
+        }
+        auto staticLoopRanges = genericOp.getStaticLoopRanges();
+        int64_t redDimSize = staticLoopRanges[redDim];
+
+        if (numLoops == 1 && redDim != -1 && redDimSize % warpSize == 0 &&
+            redDimSize > warpSize)
+          return true;
+      }
+    }
+    return false;
+  };
+
+  config.transformBuilder = [=](ImplicitLocOpBuilder &b, Operation *op,
+                                Value pdlV) {
+    auto genericOp = llvm::dyn_cast_or_null<linalg::GenericOp>(op);
+    ::mlir::OperandRange initRange = genericOp.getDpsInits();
+    int64_t redDim = *getReductionDim(genericOp);
+    auto staticLoopRanges = genericOp.getStaticLoopRanges();
+    int64_t redDimSize = staticLoopRanges[redDim];
+    int64_t splitFactor = redDimSize / warpSize;
+    // tile redution dim & mapping parallel dim to warp
+    auto mappingWarpAttr = gpu::GPUWarpMappingAttr::get(
+        b.getContext(), gpu::MappingId::LinearDim0);
+
+    SmallVector<int64_t> numThreads{splitFactor};
+
+    auto tileReductionOp = b.create<transform::TileReductionUsingForallOp>(
+        /* target */ pdlV,
+        /* num_threads */ numThreads,
+        /*staticTileSizes*/ SmallVector<int64_t>{},
+        /*mapping*/ b.getArrayAttr(mappingWarpAttr));
+
+    b.create<transform::AnnotateOp>(
+        /* target */ tileReductionOp.getSplitLinalgOp(),
+        /* name */ kWarpReduction,
+        /* param */ Value());
+
+    b.create<transform::AnnotateOp>(
+        /* target */ tileReductionOp.getCombiningLinalgOp(),
+        /* name */ kWarpReduction,
+        /* param */ Value());
+
+    int64_t initStart = initRange.getBeginOperandIndex();
+    int64_t initEnd = initStart + initRange.size();
+    for (int64_t i = initStart; i < initEnd; ++i) {
+      // get the neutral tensor.empty()
+      auto producer = b.create<transform::GetProducerOfOperand>(
+          /* producer type */ transform::OperationType::get(
+              b.getContext(), tensor::EmptyOp::getOperationName()),
+          /* target */ tileReductionOp.getFillOp()[0],
+          /* operand number */ i);
+
+      // promote to WorkGroup
+      auto workgroupMemoryAddressSpace = gpu::AddressSpaceAttr::get(
+          b.getContext(), gpu::GPUDialect::getWorkgroupAddressSpace());
+
+      promoteAllTensorsWithinOp(b, producer, workgroupMemoryAddressSpace);
+    }
+
+    // fuse fill
+    b.create<transform::FuseIntoContainingOp>(
+        /* producerOp */ tileReductionOp.getFillOp()[0],
+        /* containingOp */ tileReductionOp.getForallOp());
+  };
+
+  pm.addPass(createGenericTransformInsertionPass(config));
+}
+
+void createGPUTileWarpReductionTransformImpl(OpPassManager &pm,
+                                             const std::string &anchor,
+                                             const std::string &prefix,
+                                             int64_t warpSize) {
+  TransformInsertionConfig config;
+  config.funcAnchor = anchor;
+  config.matchPrefix = prefix;
+  config.opFilter = [=](Operation *op) {
+    if (auto genericOp = llvm::dyn_cast_or_null<linalg::GenericOp>(op)) {
+      if (isWarpReductionOp(genericOp) || isBlockReductionOp(genericOp)) {
+        int64_t numLoops = genericOp.getNumLoops();
+        int64_t redDim = -1;
+        SmallVector<unsigned> reductionDims;
+        genericOp.getReductionDims(reductionDims);
+        if (reductionDims.size() == 1) {
+          redDim = reductionDims[0];
+        } else {
+          return false;
+        }
+        auto staticLoopRanges = genericOp.getStaticLoopRanges();
+        if (staticLoopRanges[redDim] != ShapedType::kDynamic && numLoops == 1 &&
+            redDim != -1 && staticLoopRanges[redDim] <= warpSize)
+          return true;
+      }
+    }
+    return false;
+  };
+
+  config.transformBuilder = [=](ImplicitLocOpBuilder &b, Operation *op,
+                                Value pdlV) {
+    auto genericOp = llvm::cast<linalg::GenericOp>(op);
+    scf::ForallOp parentOp = genericOp->getParentOfType<scf::ForallOp>();
+    Value toVectorize = pdlV;
+    Value forall = b.create<transform::GetParentOp>(
+        pdlV.getType(), pdlV,
+        /* isolated_from_above */ false,
+        /* allow_empty_results */ false,
+        /* op_name */ b.getStringAttr(scf::ForallOp::getOperationName()),
+        /* deduplicate */ false,
+        /* nth_parent */ 1);
+    if (!parentOp || !isMappedToGPUWarps(parentOp)) {
+      std::vector<ProducerSelector> fuseCandidates;
+      for (OpOperand &opOperand : genericOp.getDpsInitsMutable()) {
+        ProducerSelector::detectFillOperand(&opOperand, fuseCandidates);
+      }
+
+      SmallVector<Attribute> mapping{gpu::GPUWarpMappingAttr::get(
+          b.getContext(), gpu::MappingId::LinearDim0)};
+      SmallVector<int64_t> numThreads(1, 1);
+      auto tileOp =
+          tileToForallAndFuseImpl(b, pdlV, numThreads, mapping, fuseCandidates,
+                                  /* asNumThreads = */ true);
+      forall = tileOp.getForallOp();
+      toVectorize = tileOp.getTiledOp();
+    }
+
+    // convert inner redution to vector multi_reduction
+    b.create<transform::VectorizeOp>(
+        /* target */ toVectorize,
+        /* vector_sizes */ ValueRange{},
+        /* static_vector_sizes */ SmallVector<int64_t>{},
+        /* vectorize_nd_extract */ b.getUnitAttr(),
+        /* scalable_sizes */ SmallVector<bool>{});
+
+    // lower vector.multi_reduction to vector.reduction
+    b.create<transform::ApplyPatternsOp>(
+        forall, [](OpBuilder &b, Location loc) {
+          b.create<transform::ApplyLowerMultiReductionPatternsOp>(
+              loc, vector::VectorMultiReductionLowering::InnerReduction);
+        });
+  };
+  pm.addPass(createGenericTransformInsertionPass(config));
+}
+
+void createGPUTileThreadReductionTransformImpl(
+    OpPassManager &pm, const std::string &anchor, const std::string &prefix,
+    const utils::IteratorType iterType) {
+  TransformInsertionConfig config;
+  config.funcAnchor = anchor;
+  config.matchPrefix = prefix;
+  config.opFilter = [=](Operation *op) {
+    if (auto genericOp = llvm::dyn_cast_or_null<linalg::GenericOp>(op)) {
+      return getThreadTileConfig(genericOp, iterType).has_value();
     }
     return false;
   };
@@ -897,7 +1387,8 @@ void createGPUTileThreadReductionTransformImpl(OpPassManager &pm,
   config.transformBuilder = [=](ImplicitLocOpBuilder &b, Operation *op,
                                 Value pdlV) {
     auto tileConfig =
-        getThreadTileConfig(llvm::cast<linalg::GenericOp>(op)).value();
+        getThreadTileConfig(llvm::cast<linalg::GenericOp>(op), iterType)
+            .value();
     tileConfig.apply(b, pdlV);
   };
 
@@ -916,8 +1407,7 @@ void mlir::createGPUTileGridReductionTransform(
     OpPassManager &pm, const GPUTileGridReductionOptions &options) {
   invokeOpPassPipelineBuilder(createGPUTileGridReductionTransformImpl, pm,
                               options.funcAnchor, options.annotatePrefix,
-                              options.warpSize, options.blockSize,
-                              options.usingForall);
+                              options.warpSize, options.blockSize);
 }
 
 void mlir::createGPUSplitBlockReductionTransform(
@@ -931,12 +1421,26 @@ void mlir::createGPUTileBlockReductionTransform(
     OpPassManager &pm, const GPUTileBlockReductionOptions &options) {
   invokeOpPassPipelineBuilder(createGPUTileBlockReductionTransformImpl, pm,
                               options.funcAnchor, options.annotatePrefix,
-                              options.warpSize, options.blockSize,
-                              options.usingForall);
+                              options.warpSize, options.blockSize);
+}
+
+void mlir::createGPUTileSplitWarpReductionTransform(
+    OpPassManager &pm, const GPUTileSplitWarpReductionOptions &options) {
+  invokeOpPassPipelineBuilder(createGPUTileSplitWarpReductionTransformImpl, pm,
+                              options.funcAnchor, options.annotatePrefix,
+                              options.blockSize, options.warpSize);
+}
+
+void mlir::createGPUTileWarpReductionTransform(
+    OpPassManager &pm, const GPUTileWarpReductionOptions &options) {
+  invokeOpPassPipelineBuilder(createGPUTileWarpReductionTransformImpl, pm,
+                              options.funcAnchor, options.annotatePrefix,
+                              options.warpSize);
 }
 
 void mlir::createGPUTileThreadReductionTransform(
     OpPassManager &pm, const GPUTileThreadReductionOptions &options) {
   invokeOpPassPipelineBuilder(createGPUTileThreadReductionTransformImpl, pm,
-                              options.funcAnchor, options.annotatePrefix);
+                              options.funcAnchor, options.annotatePrefix,
+                              options.iteratorType);
 }

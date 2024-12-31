@@ -16,8 +16,11 @@
 //===----------------------------------------------------------------------===//
 
 #include "byteir/Dialect/MemRef/Transforms/RemoveCopy.h"
+#include "byteir/Dialect/Byre/ByreDialect.h"
 #include "byteir/Dialect/MemRef/Utils/MemEffect.h"
 #include "byteir/Utils/Hoist.h"
+#include "byteir/Utils/MemUtils.h"
+#include "byteir/Utils/Utils.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -43,17 +46,110 @@ bool anyIncompatibleUse(Value oldValue, Value newValue) {
                       [](OpOperand &operand) {
                         Operation *op = operand.getOwner();
                         Dialect *dialect = op->getDialect();
-                        return llvm::isa<memref::CollapseShapeOp, func::CallOp>(
-                                   op) ||
+                        return llvm::isa<memref::CollapseShapeOp, func::CallOp,
+                                         memref::ExpandShapeOp>(op) ||
                                (dialect && dialect->getNamespace() == "byre");
                       }) &&
          (oldValue.getType() != newValue.getType());
 }
 
+/// Replace the uses of `oldOp` with the given `val` and for subview uses
+/// propagate the type change. Changing the memref type may require propagating
+/// it through subview ops so we cannot just do a replaceAllUse but need to
+/// propagate the type change and erase old subview ops.
+void replaceUsesAndPropagateType(RewriterBase &rewriter, Operation *oldOp,
+                                 Value val) {
+  SmallVector<Operation *> opsToDelete;
+  SmallVector<OpOperand *> operandsToReplace;
+
+  // Save the operand to replace / delete later (avoid iterator invalidation).
+  // TODO: can we use an early_inc iterator?
+  for (OpOperand &use : oldOp->getUses()) {
+    // Non-subview ops will be replaced by `val`.
+    auto subviewUse = dyn_cast<memref::SubViewOp>(use.getOwner());
+    if (!subviewUse) {
+      operandsToReplace.push_back(&use);
+      continue;
+    }
+
+    // `subview(old_op)` is replaced by a new `subview(val)`.
+    OpBuilder::InsertionGuard g(rewriter);
+    rewriter.setInsertionPoint(subviewUse);
+    Type newType = memref::SubViewOp::inferRankReducedResultType(
+        subviewUse.getType().getShape(), cast<MemRefType>(val.getType()),
+        subviewUse.getStaticOffsets(), subviewUse.getStaticSizes(),
+        subviewUse.getStaticStrides());
+    Value newSubview = rewriter.create<memref::SubViewOp>(
+        subviewUse->getLoc(), cast<MemRefType>(newType), val,
+        subviewUse.getMixedOffsets(), subviewUse.getMixedSizes(),
+        subviewUse.getMixedStrides());
+
+    // Ouch recursion ... is this really necessary?
+    replaceUsesAndPropagateType(rewriter, subviewUse, newSubview);
+
+    opsToDelete.push_back(use.getOwner());
+  }
+
+  // Perform late replacement.
+  // TODO: can we use an early_inc iterator?
+  for (OpOperand *operand : operandsToReplace) {
+    Operation *op = operand->getOwner();
+    rewriter.startOpModification(op);
+    operand->set(val);
+    rewriter.finalizeOpModification(op);
+  }
+
+  // Perform late op erasure.
+  // TODO: can we use an early_inc iterator?
+  for (Operation *op : opsToDelete)
+    rewriter.eraseOp(op);
+}
+
+// Check whether all uses of oldValue can be safely replaced with newValue after
+// casting.
+bool anyIncompatibleUseWithCast(Value oldValue, Value newValue) {
+  bool incompatible = llvm::any_of(oldValue.getUses(), [](OpOperand &operand) {
+    Operation *op = operand.getOwner();
+    Dialect *dialect = op->getDialect();
+    return llvm::isa<memref::CollapseShapeOp, memref::ExpandShapeOp,
+                     func::CallOp>(op) ||
+           (dialect && dialect->getNamespace() == "byre");
+  });
+  incompatible &= (!isStaticShapeAndContiguousRowMajorEx(
+                       oldValue.getType().cast<MemRefType>()) ||
+                   !isStaticShapeAndContiguousRowMajorEx(
+                       newValue.getType().cast<MemRefType>()));
+  return incompatible;
+}
+
+SmallVector<Operation *> getReshapeOp(Value value) {
+  SmallVector<Operation *> reshapeOps;
+  auto operation = value.getDefiningOp();
+  while (operation &&
+         isa<memref::CollapseShapeOp, memref::ExpandShapeOp>(operation)) {
+    reshapeOps.push_back(operation);
+    value = operation->getOperand(0);
+    operation = value.getDefiningOp();
+  }
+  if (operation && isa<memref::AllocOp>(operation))
+    return reshapeOps;
+  return {};
+}
+
+int64_t extractOffset(MemRefType memref) {
+  int64_t offset{0};
+  SmallVector<int64_t> strides;
+  if (failed(getStridesAndOffset(memref, strides, offset)))
+    return 0;
+  return offset;
+}
+
 class RemoveCopyPattern : public OpRewritePattern<memref::CopyOp> {
 public:
-  RemoveCopyPattern(MLIRContext *context, DominanceInfo &dom)
-      : OpRewritePattern(context), domInfo(dom) {}
+  RemoveCopyPattern(MLIRContext *context, DominanceInfo &dom,
+                    bool enableByreAlias)
+      : OpRewritePattern(context), domInfo(dom),
+        enableByreAlias(enableByreAlias) {}
 
   LogicalResult matchAndRewrite(memref::CopyOp copyOp,
                                 PatternRewriter &rewriter) const override {
@@ -63,12 +159,6 @@ public:
       return failure();
 
     LLVM_DEBUG(llvm::dbgs() << "match CopyOp " << copyOp << "\n");
-
-    // only support at least one alloc for now
-    if (!src.getDefiningOp<memref::AllocOp>() &&
-        !target.getDefiningOp<memref::AllocOp>()) {
-      return failure();
-    }
 
     auto allocUseInTerminator = [](memref::AllocOp alloc) {
       for (auto user : alloc.getResult().getUsers()) {
@@ -93,8 +183,15 @@ public:
       }
     }
 
+    auto srcMemSpace = cast<MemRefType>(src.getType()).getMemorySpace();
+    auto dstMemSpace = cast<MemRefType>(target.getType()).getMemorySpace();
+    if (srcMemSpace && dstMemSpace && srcMemSpace != dstMemSpace) {
+      return failure();
+    }
+
     SmallVector<SmallVector<Value>, 2> aliases(2);
     getAllAlias(copyOp, aliases, /*skipNonOverlapedSubviews*/ true);
+    aliases[0].push_back(copyOp.getSource());
 
     llvm::DenseMap<Operation *, unsigned> opToIdx;
     unsigned idx = 0;
@@ -102,7 +199,16 @@ public:
         [&](Operation *inner) { opToIdx[inner] = idx++; });
 
     SmallVector<OpMemEffectOrder, 2> memEffects(2);
-    getMemEffects(memEffects, aliases, opToIdx, opToIdx[copyOp]);
+    auto hasReadEffectFn = [](OpOperand &opOpernad) -> bool {
+      if (maybeOpOperandRead(opOpernad) ||
+          llvm::isa<func::ReturnOp>(opOpernad.getOwner())) {
+        return true;
+      }
+      return false;
+    };
+
+    getMemEffects(memEffects, aliases, opToIdx, opToIdx[copyOp],
+                  hasReadEffectFn);
 
     auto hasReadAfterWrite = [&](ArrayRef<Operation *> reads,
                                  ArrayRef<Operation *> writes) {
@@ -155,7 +261,8 @@ public:
     // we prefer target alloc over src alloc in this implementation
     if (auto targetAlloc = target.getDefiningOp<memref::AllocOp>()) {
       if (auto srcDef = src.getDefiningOp()) {
-        if (isa<memref::AllocOp, memref::SubViewOp>(srcDef))
+        if (isa<memref::AllocOp, memref::SubViewOp, memref::ExpandShapeOp,
+                memref::ExpandShapeOp>(srcDef))
           hoistUpOpInBlock(srcDef, domInfo);
       }
 
@@ -167,7 +274,62 @@ public:
       }
 
       if (!anyIncompatibleUse(target, src)) {
-        rewriter.replaceOp(targetAlloc, {src});
+        replaceUsesAndPropagateType(rewriter, targetAlloc, src);
+        return success();
+      }
+
+      if (!anyIncompatibleUseWithCast(target, src)) {
+        // The memref of source and target are contiguous, cast source value to
+        // the same type with target. As `byre.alias` could handle source with
+        // offset, `memref.(reinterpret)cast` would be converted to `byre.alias`
+        // in pass `memref-to-byre`.
+        LLVM_DEBUG(llvm::dbgs()
+                   << "contiguous src type: " << src.getType() << "\n");
+        LLVM_DEBUG(llvm::dbgs()
+                   << "contiguous dst type: " << target.getType() << "\n");
+
+        auto sourceMemref = src.getType().cast<MemRefType>();
+        auto targetMemref = target.getType().cast<MemRefType>();
+        // target generated by memref.alloc(), it must be identity.
+        assert(targetMemref.getLayout().isIdentity());
+        int64_t srcMemrefOffset = 0;
+        int64_t tgtMemrefOffset = 0;
+        SmallVector<int64_t> srcStrides;
+        SmallVector<int64_t> tgtStrides;
+        if (failed(
+                getStridesAndOffset(sourceMemref, srcStrides, srcMemrefOffset)))
+          return failure();
+        if (failed(
+                getStridesAndOffset(targetMemref, tgtStrides, tgtMemrefOffset)))
+          return failure();
+
+        bool needCast = srcMemrefOffset ||
+                        llvm::any_of(llvm::zip(srcStrides, tgtStrides),
+                                     [](std::tuple<int64_t, int64_t> s) {
+                                       return std::get<0>(s) != std::get<1>(s);
+                                     });
+
+        Value srcCast;
+        if (needCast) {
+          if (srcMemrefOffset == 0) {
+            srcCast = rewriter.create<memref::ReinterpretCastOp>(
+                copyOp.getLoc(), targetMemref, src, tgtMemrefOffset,
+                targetMemref.getShape(), tgtStrides);
+          } else {
+            if (this->enableByreAlias) {
+              // use byre.alias to decouple offset from memref type
+              srcCast = rewriter.create<byre::AliasOp>(
+                  copyOp.getLoc(), targetMemref, src, srcMemrefOffset);
+            } else {
+              return failure();
+            }
+          }
+        } else {
+          srcCast = rewriter.create<memref::CastOp>(copyOp.getLoc(),
+                                                    targetMemref, src);
+        }
+        rewriter.replaceAllUsesWith(targetAlloc, {srcCast});
+        rewriter.eraseOp(copyOp);
         return success();
       }
     }
@@ -185,9 +347,55 @@ public:
       }
 
       if (!anyIncompatibleUse(src, target)) {
-        rewriter.replaceOp(srcAlloc, {target});
+        replaceUsesAndPropagateType(rewriter, srcAlloc, target);
         return success();
       }
+    }
+
+    if (llvm::isa<BlockArgument>(target) &&
+        isa<func::FuncOp>(copyOp->getParentOp())) {
+      memref::AllocOp srcAllocOp;
+      for (auto alias : aliases[0]) {
+        auto defOp = alias.getDefiningOp();
+        if (!defOp) {
+          return failure();
+        }
+        if (!llvm::isa<memref::AllocOp, memref::CollapseShapeOp,
+                       memref::ExpandShapeOp>(defOp)) {
+          return failure();
+        }
+        if (auto allocOp = dyn_cast<memref::AllocOp>(defOp)) {
+          srcAllocOp = allocOp;
+        }
+      }
+
+      if (!srcAllocOp || target.getType() != src.getType()) {
+        return failure();
+      }
+
+      // using CollapseShapeOp/ExpandShapeOp reshape target to src alloc.
+      rewriter.setInsertionPoint(srcAllocOp);
+      Value alias = src;
+      Value reshapeTarget = target;
+      while (!alias.getDefiningOp<memref::AllocOp>()) {
+        auto defOp = alias.getDefiningOp();
+        if (auto collapseShapeOp = dyn_cast<memref::CollapseShapeOp>(defOp)) {
+          // FIXME: expandShape doesn't support expanding dynamic dims.
+          reshapeTarget = rewriter.create<memref::ExpandShapeOp>(
+              alias.getLoc(), collapseShapeOp.getSrcType(), reshapeTarget,
+              collapseShapeOp.getReassociationIndices());
+          alias = collapseShapeOp.getSrc();
+        } else if (auto expandShapeOp =
+                       dyn_cast<memref::ExpandShapeOp>(defOp)) {
+          reshapeTarget = rewriter.create<memref::CollapseShapeOp>(
+              srcAllocOp.getLoc(), expandShapeOp.getSrcType(), reshapeTarget,
+              expandShapeOp.getReassociationIndices());
+          alias = expandShapeOp.getSrc();
+        }
+      }
+      replaceUsesAndPropagateType(rewriter, srcAllocOp, reshapeTarget);
+      rewriter.eraseOp(copyOp);
+      return success();
     }
 
     return failure();
@@ -195,6 +403,7 @@ public:
 
 private:
   DominanceInfo &domInfo;
+  bool enableByreAlias;
 };
 
 struct RemoveCopyPass : public RemoveCopyBase<RemoveCopyPass> {
@@ -203,10 +412,17 @@ public:
   void runOnOperation() override {
 
     func::FuncOp funcOp = getOperation();
+    bool isByreEntryFunc =
+        funcOp->hasAttrOfType<UnitAttr>(
+            byre::ByreDialect::getEntryPointFunctionAttrName()) ||
+        funcOp->hasAttrOfType<UnitAttr>(getAttrPlaceholderName(
+            byre::ByreDialect::getEntryPointFunctionAttrName()));
+
     auto &domInfo = getAnalysis<DominanceInfo>();
     auto &ctx = getContext();
     RewritePatternSet patterns(&ctx);
-    populateRemoveCopyAfterBufferizationPattern(patterns, domInfo);
+    populateRemoveCopyAfterBufferizationPattern(
+        patterns, domInfo, /*enableByreAlias=*/isByreEntryFunc);
 
     // also insert related canonicalizer
     memref::AllocOp::getCanonicalizationPatterns(patterns, &ctx);
@@ -222,6 +438,7 @@ public:
     // Use TopDownTraversal for compile time reasons
     GreedyRewriteConfig grc;
     grc.useTopDownTraversal = true;
+    grc.maxIterations = 20;
     if (failed(applyPatternsAndFoldGreedily(funcOp, frozenPatterns, grc))) {
       signalPassFailure();
     }
@@ -231,8 +448,9 @@ public:
 } // namespace
 
 void mlir::populateRemoveCopyAfterBufferizationPattern(
-    RewritePatternSet &patterns, DominanceInfo &domInfo) {
-  patterns.add<RemoveCopyPattern>(patterns.getContext(), domInfo);
+    RewritePatternSet &patterns, DominanceInfo &domInfo, bool enableByreAlias) {
+  patterns.add<RemoveCopyPattern>(patterns.getContext(), domInfo,
+                                  enableByreAlias);
 }
 
 std::unique_ptr<OperationPass<func::FuncOp>> mlir::createRemoveCopyPass() {

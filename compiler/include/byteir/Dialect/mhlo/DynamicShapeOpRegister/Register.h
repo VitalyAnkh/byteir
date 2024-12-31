@@ -33,8 +33,13 @@ void registerDynamicReshapeInferReturnTypeComponents();
 void registerRealDynamicSliceInferReturnTypeComponents();
 void registerReduceInferReturnTypeComponents();
 void registerSoftmaxInferReturnTypeComponents();
+void registerAddNInferReturnTypeComponents();
+void registerOneHotInferReturnTypeComponents();
 void registerTorchIndexSelectInferReturnTypeComponents();
 void registerGeLUInferReturnTypeComponents();
+void registerLayerNormInferReturnTypeComponents();
+void registerBatchMatMulInferReturnTypeComponents();
+void registerStridedSliceInferReturnTypeComponents();
 
 inline void registerAllMhloInferReturnTypeComponents() {
   registerConvolutionInferReturnTypeComponents();
@@ -45,8 +50,13 @@ inline void registerAllMhloInferReturnTypeComponents() {
   registerRealDynamicSliceInferReturnTypeComponents();
   registerReduceInferReturnTypeComponents();
   registerSoftmaxInferReturnTypeComponents();
+  registerAddNInferReturnTypeComponents();
+  registerOneHotInferReturnTypeComponents();
   registerTorchIndexSelectInferReturnTypeComponents();
   registerGeLUInferReturnTypeComponents();
+  registerLayerNormInferReturnTypeComponents();
+  registerBatchMatMulInferReturnTypeComponents();
+  registerStridedSliceInferReturnTypeComponents();
 }
 
 //===----------------------------------------------------------------------===//
@@ -54,14 +64,14 @@ inline void registerAllMhloInferReturnTypeComponents() {
 //===----------------------------------------------------------------------===//
 void registerDynamicPartitionInferBoundedReturnTypeComponents();
 void registerNonZeroInferBoundedReturnTypeComponents();
-void registerWhereInferBoundedReturnTypeComponents();
+void registerScatterNdInferBoundedReturnTypeComponents();
 void registerStridedSliceInferBoundedReturnTypeComponents();
 void registerRepeatInferBoundedReturnTypeComponents();
 
 inline void registerAllMhloInferBoundedReturnTypeComponents() {
   registerDynamicPartitionInferBoundedReturnTypeComponents();
   registerNonZeroInferBoundedReturnTypeComponents();
-  registerWhereInferBoundedReturnTypeComponents();
+  registerScatterNdInferBoundedReturnTypeComponents();
   registerStridedSliceInferBoundedReturnTypeComponents();
   registerRepeatInferBoundedReturnTypeComponents();
 }
@@ -76,6 +86,7 @@ void registerDynamicBroadcastInDimReifyReturnTypeShapes();
 void registerSoftmaxReifyReturnTypeShapes();
 void registerTorchIndexSelectReifyReturnTypeShapes();
 void registerGeLUReifyReturnTypeShapes();
+void registerStridedSliceReifyReturnTypeShapes();
 
 inline void registerAllMhloReifyReturnTypeShapes() {
   registerDotReifyReturnTypeShapes();
@@ -85,6 +96,7 @@ inline void registerAllMhloReifyReturnTypeShapes() {
   registerSoftmaxReifyReturnTypeShapes();
   registerTorchIndexSelectReifyReturnTypeShapes();
   registerGeLUReifyReturnTypeShapes();
+  registerStridedSliceReifyReturnTypeShapes();
 }
 
 //===----------------------------------------------------------------------===//
@@ -96,6 +108,7 @@ void registerDynamicPartitionShapeConstraints();
 void registerDynamicReshapeShapeConstraints();
 void registerEinsumShapeConstraints();
 void registerReshapeShapeConstraints();
+void registerOneHotShapeConstraints();
 
 inline void registerAllMhloShapeConstraints() {
   registerConcatenateShapeConstraints();
@@ -104,6 +117,7 @@ inline void registerAllMhloShapeConstraints() {
   registerDynamicReshapeShapeConstraints();
   registerEinsumShapeConstraints();
   registerReshapeShapeConstraints();
+  registerOneHotShapeConstraints();
 }
 
 } // namespace mlir

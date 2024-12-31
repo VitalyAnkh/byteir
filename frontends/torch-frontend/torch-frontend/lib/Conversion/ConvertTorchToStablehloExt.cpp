@@ -27,6 +27,7 @@
 #include "./PassDetail.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Shape/IR/Shape.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "stablehlo/dialect/ChloOps.h"
 #include "stablehlo/dialect/StablehloOps.h"
@@ -55,12 +56,12 @@ struct ConvertAten_IndexPutImplOp
     Location loc = op->getLoc();
     Value input = adaptor.getSelf();
     Value values = adaptor.getValues();
-    auto inputType = input.getType().cast<RankedTensorType>();
+    auto inputType = cast<RankedTensorType>(input.getType());
     SmallVector<int64_t> inputShape(inputType.getShape());
     if (inputShape.size() != 2) {
       return op->emitError("only support 2D input in index_put");
     }
-    auto valuesType = values.getType().cast<RankedTensorType>();
+    auto valuesType = cast<RankedTensorType>(values.getType());
     SmallVector<int64_t> valuesShape(valuesType.getShape());
     if (valuesShape.size() != 3) {
       return op->emitError("only support 3D values in index_put");
@@ -69,7 +70,7 @@ struct ConvertAten_IndexPutImplOp
     bool accumulate;
     if (!matchPattern(op.getAccumulate(), m_TorchConstantBool(&accumulate))) {
       return rewriter.notifyMatchFailure(
-          op, "unimplemented: accumulate must be a constant beool");
+          op, "unimplemented: accumulate must be a constant bool");
     }
     if (!accumulate) {
       return op->emitError("accumulate must be true");
@@ -85,7 +86,7 @@ struct ConvertAten_IndexPutImplOp
     }
     Value index = indicesList[0];
 
-    if (index.getType().isa<Torch::NoneType>())
+    if (isa<Torch::NoneType>(index.getType()))
       return rewriter.notifyMatchFailure(op, "Index tensor must not be None.");
 
     index = typeConverter->materializeTargetConversion(
@@ -95,7 +96,7 @@ struct ConvertAten_IndexPutImplOp
     // index: [Q, P] -> [Q * P, 1]
     // values: [Q, P, N] -> [Q * P, N]
 
-    auto indexType = index.getType().cast<RankedTensorType>();
+    auto indexType = cast<RankedTensorType>(index.getType());
     SmallVector<int64_t> indexShape(indexType.getShape());
     if (indexShape.size() != 2) {
       return op->emitError("only support 2D index in index_put");
@@ -121,6 +122,8 @@ struct ConvertAten_IndexPutImplOp
             rewriter.getContext(),
             /*updateWindowDims=*/updateWindowDims,
             /*insertedWindowDims=*/insertedWindowDims,
+            /*inputBatchingDims=*/{},
+            /*scatterIndicesBatchingDims=*/{},
             /*scatterDimsToOperandDims=*/scatterDimsToOperandDims,
             /*indexVectorDim=*/indexVectorDim);
 
@@ -162,13 +165,13 @@ struct ConvertAtenMaxPool2dWithIndicesBackwardOp
   matchAndRewrite(AtenMaxPool2dWithIndicesBackwardOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     Value input = adaptor.getSelf();
-    auto inputTy = input.getType().cast<RankedTensorType>();
+    auto inputTy = cast<RankedTensorType>(input.getType());
     auto inputElemTy = inputTy.getElementType();
     auto inputRank = inputTy.getRank();
     Value gradOutput = adaptor.getGradOutput();
 
     auto outValTy =
-        getTypeConverter()->convertType(op.getType()).cast<RankedTensorType>();
+        cast<RankedTensorType>(getTypeConverter()->convertType(op.getType()));
 
     SmallVector<int64_t, 2> padding, kernelSize, stride, dilation;
 
@@ -212,15 +215,10 @@ struct ConvertAtenMaxPool2dWithIndicesBackwardOp
     stablehloPadding[stablehloPadding.size() - 2] = padding[1];
     stablehloPadding[stablehloPadding.size() - 1] = padding[1];
 
-    DenseIntElementsAttr windowDimensions = DenseIntElementsAttr::get(
-        RankedTensorType::get(
-            {static_cast<int64_t>(stablehloKernelSize.size())},
-            rewriter.getI64Type()),
-        stablehloKernelSize);
-    DenseIntElementsAttr windowStrides = DenseIntElementsAttr::get(
-        RankedTensorType::get({static_cast<int64_t>(stablehloStride.size())},
-                              rewriter.getI64Type()),
-        stablehloStride);
+    DenseI64ArrayAttr windowDimensions =
+        rewriter.getDenseI64ArrayAttr(stablehloKernelSize);
+    DenseI64ArrayAttr windowStrides =
+        rewriter.getDenseI64ArrayAttr(stablehloStride);
     DenseIntElementsAttr pad = DenseIntElementsAttr::get(
         RankedTensorType::get(
             {static_cast<int64_t>(inputRank), static_cast<int64_t>(2)},
@@ -230,15 +228,14 @@ struct ConvertAtenMaxPool2dWithIndicesBackwardOp
     // Constant zero
     auto constType = RankedTensorType::get({}, inputElemTy);
     Value initVal;
-    if (inputElemTy.isa<mlir::FloatType>()) {
+    if (isa<mlir::FloatType>(inputElemTy)) {
       auto constAttr = DenseElementsAttr::get(
-          constType,
-          {APFloat::getZero(
-              inputElemTy.cast<mlir::FloatType>().getFloatSemantics(),
-              /*negative=*/false)});
+          constType, {APFloat::getZero(
+                         cast<mlir::FloatType>(inputElemTy).getFloatSemantics(),
+                         /*negative=*/false)});
       initVal = rewriter.create<stablehlo::ConstantOp>(op->getLoc(), constType,
                                                        constAttr);
-    } else if (inputElemTy.isa<mlir::IntegerType>() &&
+    } else if (isa<mlir::IntegerType>(inputElemTy) &&
                inputElemTy.getIntOrFloatBitWidth() != 8) {
       auto constAttr = DenseElementsAttr::get(
           constType, {APInt::getZero(inputElemTy.getIntOrFloatBitWidth())});
@@ -295,16 +292,16 @@ struct ConvertAtenPowScalarOp : public OpConversionPattern<AtenPowScalarOp> {
   matchAndRewrite(AtenPowScalarOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     Value lhs = adaptor.getSelf();
-    auto lhsType = lhs.getType().dyn_cast<TensorType>();
+    auto lhsType = dyn_cast<TensorType>(lhs.getType());
     Value rhs = adaptor.getExponent();
-    TensorType rhsType = rhs.getType().dyn_cast<TensorType>();
+    TensorType rhsType = dyn_cast<TensorType>(rhs.getType());
 
     if (!rhsType)
       return op.emitError("only Tensor types supported in StableHLO");
 
-    auto outType = OpConversionPattern<AtenPowScalarOp>::getTypeConverter()
-                       ->convertType(op.getType())
-                       .template cast<TensorType>();
+    auto outType = cast<TensorType>(
+        OpConversionPattern<AtenPowScalarOp>::getTypeConverter()->convertType(
+            op.getType()));
 
     Type outElemTy = outType.getElementType();
     if (!outElemTy.isIntOrFloat()) {
@@ -315,13 +312,37 @@ struct ConvertAtenPowScalarOp : public OpConversionPattern<AtenPowScalarOp> {
     if (!lhsType) {
       lhs = hlo::scalarToStablehloTensor(rewriter, op, lhs, outElemTy);
     }
-    DenseIntElementsAttr bcastDimensions;
-    lhs = hlo::promoteType(rewriter, op.getLoc(), lhs, outType);
-    rhs = hlo::promoteType(rewriter, op.getLoc(), rhs, outType);
+    DenseI64ArrayAttr bcastDimensions;
+    lhs = hlo::promoteType(rewriter, op.getLoc(), lhs, outElemTy);
+    rhs = hlo::promoteType(rewriter, op.getLoc(), rhs, outElemTy);
     auto loc = op.getLoc();
     Value result = rewriter.create<chlo::BroadcastPowOp>(loc, outType, lhs, rhs,
                                                          bcastDimensions);
 
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
+// AtenExpandAsOp
+struct ConvertAtenExpandAsOp : public OpConversionPattern<AtenExpandAsOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(AtenExpandAsOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Value lhs = adaptor.getSelf();
+    Value rhs = adaptor.getOther();
+    int64_t lhs_rank = cast<RankedTensorType>(lhs.getType()).getRank();
+    int64_t rhs_rank = cast<RankedTensorType>(rhs.getType()).getRank();
+    auto outType =
+        cast<RankedTensorType>(getTypeConverter()->convertType(op.getType()));
+
+    Value shape = rewriter.create<shape::ShapeOfOp>(op->getLoc(), rhs);
+    Value result = rewriter.create<stablehlo::DynamicBroadcastInDimOp>(
+        op->getLoc(), outType, lhs, shape,
+        rewriter.getDenseI64ArrayAttr(llvm::to_vector(
+            llvm::seq<int64_t>(rhs_rank - lhs_rank, rhs_rank))));
     rewriter.replaceOp(op, result);
     return success();
   }
@@ -338,6 +359,7 @@ struct ConvertTorchToStablehloExtPass
     registry.insert<stablehlo::StablehloDialect>();
     registry.insert<tensor::TensorDialect>();
     registry.insert<arith::ArithDialect>();
+    registry.insert<shape::ShapeDialect>();
     TorchConversion::getBackendTypeConversionDependentDialects(registry);
   }
 
@@ -346,10 +368,11 @@ struct ConvertTorchToStablehloExtPass
     ConversionTarget target(*context);
     target.addLegalDialect<Torch::TorchDialect, chlo::ChloDialect,
                            stablehlo::StablehloDialect, tensor::TensorDialect,
-                           arith::ArithDialect>();
+                           arith::ArithDialect, shape::ShapeDialect>();
     TypeConverter typeConverter;
     typeConverter.addConversion([](Type type) { return type; });
-    TorchConversion::setupBackendTypeConversion(target, typeConverter);
+    TorchConversion::setupBackendTypeConversionForStablehlo(target,
+                                                            typeConverter);
 
     RewritePatternSet patterns(context);
     target.addIllegalOp<Aten_IndexPutImplOp>();
@@ -359,6 +382,8 @@ struct ConvertTorchToStablehloExtPass
                                                             context);
     target.addIllegalOp<AtenPowScalarOp>();
     patterns.add<ConvertAtenPowScalarOp>(typeConverter, context);
+    target.addIllegalOp<AtenExpandAsOp>();
+    patterns.add<ConvertAtenExpandAsOp>(typeConverter, context);
     if (failed(applyPartialConversion(getOperation(), target,
                                       std::move(patterns)))) {
       return signalPassFailure();

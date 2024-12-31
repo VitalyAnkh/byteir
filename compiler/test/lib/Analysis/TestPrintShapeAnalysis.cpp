@@ -16,6 +16,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "byteir/Analysis/ShapeAnalysis.h"
+#include "byteir/Dialect/mhlo/Analysis/ShapeAnalysis.h"
 #include "mlir/Analysis/DataFlow/ConstantPropagationAnalysis.h"
 #include "mlir/Analysis/DataFlow/DeadCodeAnalysis.h"
 #include "mlir/Dialect/Tosa/IR/TosaOps.h"
@@ -43,8 +44,8 @@ struct TestPrintShapeAnalysisPass
     Operation *top = getOperation();
 
     DataFlowSolver solver;
-    solver.load<ShapeAnalysis>();
-    solver.load<ShapeValueAnalysis>();
+    solver.load<MhloStaticShapeAnalysis>();
+    solver.load<MhloStaticShapeValueAnalysis>();
     solver.load<DeadCodeAnalysis>();
     if (failed(solver.initializeAndRun(top)))
       return signalPassFailure();
@@ -53,7 +54,7 @@ struct TestPrintShapeAnalysisPass
         llvm::outs() << "for operation : " << *op
                      << ", inferred shapes are:\n\t";
         for (Value value : op->getResults()) {
-          if (auto lattice = solver.lookupState<ShapeLattice>(value)) {
+          if (auto lattice = solver.lookupState<StaticShapeLattice>(value)) {
             if (!lattice->getValue().isUninitialized()) {
               lattice->getValue().print(llvm::outs());
             }

@@ -24,7 +24,7 @@ llvm::cl::OptionCategory OnnxFrontendOptions("ONNX-Frontend Options", "");
 
 llvm::cl::list<std::string>
     customCallOps("custom-call-ops",
-                  llvm::cl::desc("convert ops to mhlo custom call."),
+                  llvm::cl::desc("convert ops to stablehlo custom call."),
                   llvm::cl::ZeroOrMore, llvm::cl::CommaSeparated,
                   llvm::cl::cat(OnnxFrontendOptions));
 
@@ -35,7 +35,7 @@ llvm::cl::opt<int64_t> batchSize(
 
 llvm::cl::opt<bool> enableUnroll(
     "enable-unroll",
-    llvm::cl::desc("Enable unroll rather than lowering to mhlo::WhileOp."),
+    llvm::cl::desc("Enable unroll rather than lowering to stablehlo::WhileOp."),
     llvm::cl::init(true), llvm::cl::cat(OnnxFrontendOptions));
 
 llvm::cl::opt<bool> forceSetBatchSize(
@@ -47,6 +47,11 @@ llvm::cl::opt<bool> forceSetBatchSize(
 llvm::cl::opt<std::string> inputShapes(
     "input-name-and-shapes",
     llvm::cl::desc("Specify some input's shapes. Ex. name0,2,3:name1,3,4"),
+    llvm::cl::init(""), llvm::cl::cat(OnnxFrontendOptions));
+
+llvm::cl::opt<std::string> serialVersion(
+    "serialize-version",
+    llvm::cl::desc("Specify output bc serialized version. Ex. 0.16.3 "),
     llvm::cl::init(""), llvm::cl::cat(OnnxFrontendOptions));
 
 llvm::cl::opt<int>

@@ -38,6 +38,7 @@
 #include "byteir/Utils/Hoist.h"
 #include "byteir/Utils/TileUtils.h"
 #include "byteir/Utils/Utils.h"
+#include "mlir/Analysis/TopologicalSortUtils.h"
 #include "mlir/AsmParser/AsmParser.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -49,7 +50,7 @@
 #include "mlir/Dialect/PDL/IR/PDLTypes.h"
 #include "mlir/Dialect/SCF/Transforms/TileUsingInterface.h"
 #include "mlir/Dialect/Transform/IR/TransformDialect.h"
-#include "mlir/Dialect/Transform/IR/TransformInterfaces.h"
+#include "mlir/Dialect/Transform/Interfaces/TransformInterfaces.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/Dominance.h"
 #include "mlir/IR/Matchers.h"
@@ -60,7 +61,6 @@
 #include "mlir/Interfaces/TilingInterface.h"
 #include "mlir/Transforms/InliningUtils.h"
 #include "mlir/Transforms/RegionUtils.h"
-#include "mlir/Transforms/TopologicalSortUtils.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/Support/Debug.h"
@@ -101,7 +101,7 @@ transform::AnnotateExtOp::apply(TransformRewriter &rewriter,
     addAttrs(target, attrs);
     targetOps.push_back(target);
   }
-  transformResults.set(getTransformed().cast<OpResult>(), targetOps);
+  transformResults.set(cast<OpResult>(getTransformed()), targetOps);
   return DiagnosedSilenceableFailure::success();
 }
 
@@ -130,25 +130,25 @@ transform::CollapseDimsOp::apply(transform::TransformRewriter &rewriter,
 
     SimpleRewriter rewriter(getContext());
     rewriter.setInsertionPoint(target);
-    std::optional<SmallVector<Value>> replacements =
-        collapseGenericOpIterationDims(genericOp, getReassociationIndices(),
-                                       rewriter);
-    if (!replacements)
+    FailureOr<CollapseResult> replacementsInfo =
+        mlir::linalg::collapseOpIterationDims(
+            genericOp, getReassociationIndices(), rewriter);
+    if (failed(replacementsInfo))
       return emitDefaultDefiniteFailure(target) << " failed to collapsed dims";
-
-    Operation *definingOp = (*replacements)[0].getDefiningOp();
+    auto replacements = (*replacementsInfo).results;
+    Operation *definingOp = replacements[0].getDefiningOp();
     if (llvm::isa<tensor::ExpandShapeOp>(definingOp))
       definingOp = definingOp->getOperand(0).getDefiningOp();
 
     if (!llvm::isa<linalg::GenericOp>(definingOp))
       return emitDefaultDefiniteFailure(target) << " failed to collapsed dims";
 
-    genericOp->replaceAllUsesWith(*replacements);
+    genericOp->replaceAllUsesWith(replacements);
     genericOp->erase();
 
     collapsed.push_back(definingOp);
   }
-  results.set(getTransformed().cast<OpResult>(), collapsed);
+  results.set(cast<OpResult>(getTransformed()), collapsed);
   return DiagnosedSilenceableFailure::success();
 }
 
@@ -157,7 +157,7 @@ transform::CollapseDimsOp::apply(transform::TransformRewriter &rewriter,
 //===----------------------------------------------------------------------===//
 namespace {
 LogicalResult detensorizeLinalgOp(OpBuilder &b, linalg::LinalgOp linalgOp) {
-  if (!linalgOp.hasTensorSemantics())
+  if (!linalgOp.hasPureTensorSemantics())
     return failure();
 
   if (linalgOp.getNumLoops())
@@ -190,12 +190,12 @@ LogicalResult detensorizeLinalgOp(OpBuilder &b, linalg::LinalgOp linalgOp) {
     b.clone(op, map);
   }
 
-  for (auto &&opOperand : linalgOp.getDpsInitOperands()) {
-    OpOperand *yieldOperand = linalgOp.getMatchingYieldValue(opOperand);
+  for (OpOperand &opOperand : linalgOp.getDpsInitsMutable()) {
+    OpOperand *yieldOperand = linalgOp.getMatchingYieldValue(&opOperand);
     Value element = map.lookupOrDefault(yieldOperand->get());
     Value tensor = b.create<tensor::FromElementsOp>(
         loc, RankedTensorType::get({}, element.getType()), ValueRange(element));
-    Value result = linalgOp.getTiedOpResult(opOperand);
+    Value result = linalgOp.getTiedOpResult(&opOperand);
     result.replaceAllUsesWith(tensor);
   }
   linalgOp->erase();
@@ -293,7 +293,7 @@ std::optional<std::pair<Operation *, SmallVector<Value>>>
 replaceUnitExtents(GenericOp genericOp, PatternRewriter &rewriter) {
   // Skip the pattern if the op has any tensor with special encoding.
   if (llvm::any_of(genericOp->getOperandTypes(), [](Type type) {
-        auto tensorType = type.dyn_cast<RankedTensorType>();
+        auto tensorType = dyn_cast<RankedTensorType>(type);
         return tensorType && tensorType.getEncoding() != nullptr;
       }))
     return std::nullopt;
@@ -340,7 +340,7 @@ replaceUnitExtents(GenericOp genericOp, PatternRewriter &rewriter) {
     }
     auto targetType = RankedTensorType::get(
         targetShapes[idx],
-        opOperand.get().getType().cast<ShapedType>().getElementType());
+        cast<ShapedType>(opOperand.get().getType()).getElementType());
     Value collapsed = rewriter.create<tensor::CollapseShapeOp>(
         loc, targetType, opOperand.get(), reassociations[idx]);
     newOperands.push_back(collapsed);
@@ -373,7 +373,7 @@ replaceUnitExtents(GenericOp genericOp, PatternRewriter &rewriter) {
       continue;
     }
 
-    auto origResultType = origOutput.getType().cast<RankedTensorType>();
+    auto origResultType = cast<RankedTensorType>(origOutput.getType());
     Value expanded = rewriter.create<tensor::ExpandShapeOp>(
         loc, origResultType, result.value(), reassociations[index]);
     resultReplacements.push_back(expanded);
@@ -409,7 +409,7 @@ transform::FoldUnitExtentDimsOp::apply(transform::TransformRewriter &rewriter,
 
     transformed.push_back(replacements->first);
   }
-  results.set(getTransformed().cast<OpResult>(), transformed);
+  results.set(cast<OpResult>(getTransformed()), transformed);
   return DiagnosedSilenceableFailure::success();
 }
 
@@ -517,7 +517,8 @@ static LogicalResult applyTilingToAll(
         return true;
       };
 
-      rewriter.replaceOpWithIf(toReplace, replacements, allowReplacement);
+      rewriter.replaceUsesWithIf(toReplace->getResults(), replacements,
+                                 allowReplacement);
 
       // simplify tensor::DimOp
       simplifyTensorDimOpUsedInLinalgWithinOp(*funcOp.getOperation());
@@ -560,7 +561,7 @@ static ParseResult parseTileLikeOp(OpAsmParser &parser, OperationState &result,
   if (!sizesAttr)
     return parser.emitError(opLoc)
            << "expected '" << sizesAttrName << "' attribute";
-  auto sizesArrayAttr = sizesAttr.dyn_cast<ArrayAttr>();
+  auto sizesArrayAttr = dyn_cast<ArrayAttr>(sizesAttr);
   if (!sizesArrayAttr)
     return parser.emitError(opLoc)
            << "'" << sizesAttrName << "' attribute must be an array";
@@ -590,7 +591,8 @@ transform::FuseExtOp::apply(mlir::transform::TransformRewriter &rewriter,
 
   scf::SCFTilingOptions tilingOptions;
   tilingOptions.interchangeVector = tileInterchange;
-  tilingOptions = tilingOptions.setTileSizes(tileSizes);
+  tilingOptions = tilingOptions.setTileSizes(
+      getAsIndexOpFoldResult(rewriter.getContext(), tileSizes));
   scf::SCFTileAndFuseOptions tileAndFuseOptions;
   tileAndFuseOptions.tilingOptions = tilingOptions;
   SmallVector<Operation *> targetOps =
@@ -745,7 +747,7 @@ transform::LowerToLoopsOp::apply(TransformRewriter &rewriter,
         return diag;
       }
 
-      transformResults.set(getLoops()[en.index()].cast<OpResult>(),
+      transformResults.set(cast<OpResult>(getLoops()[en.index()]),
                            {(*loops)[loopId].getOperation()});
     }
     rewriter.eraseOp(op);
@@ -880,8 +882,8 @@ transform::LinalgOutlineOp::apply(transform::TransformRewriter &rewriter,
     funcs.insert(funcOp);
     calls.push_back(callOp);
   }
-  results.set(getFunctions().cast<OpResult>(), funcs.getArrayRef());
-  results.set(getCalls().cast<OpResult>(), calls);
+  results.set(cast<OpResult>(getFunctions()), funcs.getArrayRef());
+  results.set(cast<OpResult>(getCalls()), calls);
   return DiagnosedSilenceableFailure::success();
 }
 
@@ -993,7 +995,7 @@ transform::TileExtOp::apply(TransformRewriter &rewriter,
 
     for (Operation *op : dynamicSizeProducers.back()) {
       if (op->getNumResults() == 1 &&
-          op->getResult(0).getType().isa<IndexType>())
+          isa<IndexType>(op->getResult(0).getType()))
         continue;
       DiagnosedSilenceableFailure diag =
           emitSilenceableError() << "expected sizes to be produced by ops "
@@ -1020,13 +1022,14 @@ transform::TileExtOp::apply(TransformRewriter &rewriter,
     if (!tileSizes.empty()) {
       tilingOptions.setTileSizeComputationFunction(
           [&, index](OpBuilder &b, Operation *) {
-            SmallVector<Value, 4> sizes;
+            SmallVector<OpFoldResult, 4> sizes;
             sizes.reserve(tileSizes.size());
             unsigned dynamicIdx = 0;
             for (OpFoldResult ofr : getMixedSizes()) {
-              if (auto attr = ofr.dyn_cast<Attribute>()) {
+              if (auto attr = dyn_cast<Attribute>(ofr)) {
                 sizes.push_back(b.create<arith::ConstantIndexOp>(
-                    getLoc(), attr.cast<IntegerAttr>().getInt()));
+                                     getLoc(), cast<IntegerAttr>(attr).getInt())
+                                    .getResult());
               } else {
                 sizes.push_back(
                     dynamicSizeProducers[dynamicIdx++][index]->getResult(0));
@@ -1039,7 +1042,7 @@ transform::TileExtOp::apply(TransformRewriter &rewriter,
     tilingOptions.setInterchange(getInterchange());
     SimpleRewriter rewriter(en.value()->getContext());
 
-    FailureOr<scf::SCFTilingResult> maybeTilingResult = tileUsingSCFForOp(
+    FailureOr<scf::SCFTilingResult> maybeTilingResult = tileUsingSCF(
         rewriter, cast<TilingInterface>(en.value()), tilingOptions);
 
     if (failed(maybeTilingResult))
@@ -1060,9 +1063,9 @@ transform::TileExtOp::apply(TransformRewriter &rewriter,
       loops[en2.index()].push_back(en2.value());
   }
 
-  transformResults.set(getTiledLinalgOp().cast<OpResult>(), tiled);
+  transformResults.set(cast<OpResult>(getTiledLinalgOp()), tiled);
   for (const auto &en : llvm::enumerate(loops))
-    transformResults.set(getLoops()[en.index()].cast<OpResult>(), en.value());
+    transformResults.set(cast<OpResult>(getLoops()[en.index()]), en.value());
 
   return DiagnosedSilenceableFailure::success();
 }
@@ -1131,16 +1134,13 @@ StringAttr getAllReduceType(linalg::GenericOp mergeOp, linalg::FillOp initOp) {
   StringAttr reduceType;
   MLIRContext *ctx = mergeOp.getContext();
   Block *block = &mergeOp.getRegion().front();
-  if (isBlockSingleOp<arith::AddFOp>(block) ||
-      isBlockSingleOp<arith::AddIOp>(block))
+  if (isBlockSingleOp<arith::AddFOp, arith::AddIOp>(block))
     reduceType = StringAttr::get(ctx, ccl::getRedOpSumName());
-  else if (isBlockSingleOp<arith::MaxFOp>(block) ||
-           isBlockSingleOp<arith::MaxSIOp>(block) ||
-           isBlockSingleOp<arith::MaxUIOp>(block))
+  else if (isBlockSingleOp<arith::MaximumFOp, arith::MaxNumFOp, arith::MaxSIOp,
+                           arith::MaxUIOp>(block))
     reduceType = StringAttr::get(ctx, ccl::getRedOpMaxName());
-  else if (isBlockSingleOp<arith::MinFOp>(block) ||
-           isBlockSingleOp<arith::MinSIOp>(block) ||
-           isBlockSingleOp<arith::MinUIOp>(block))
+  else if (isBlockSingleOp<arith::MinimumFOp, arith::MinNumFOp, arith::MinSIOp,
+                           arith::MinUIOp>(block))
     reduceType = StringAttr::get(ctx, ccl::getRedOpMinName());
   // TODO: support avg / prod all-reduce type
   else {
@@ -1289,7 +1289,7 @@ DiagnosedSilenceableFailure transform::SharedOutputToDistributedStyleOp::apply(
     ArrayAttr replicaGroupAttrs =
         builder.getArrayAttr({builder.getI64ArrayAttr(replicaGroup)});
 
-    BlockArgument loopOutBlockArg = loopOp.getOutputBlockArguments()[0];
+    BlockArgument loopOutBlockArg = loopOp.getRegionIterArgs()[0];
     if (!all_of(loopOutBlockArg.getUsers(), [](Operation *op) {
           return isa<tensor::ExtractSliceOp, tensor::ParallelInsertSliceOp>(op);
         })) {
@@ -1320,7 +1320,7 @@ DiagnosedSilenceableFailure transform::SharedOutputToDistributedStyleOp::apply(
     }
 
     // create new init op, reset the types and replace all the uses
-    ShapedType retType = mergeOp->getResult(0).getType().dyn_cast<ShapedType>();
+    ShapedType retType = dyn_cast<ShapedType>(mergeOp->getResult(0).getType());
     if (!retType) {
       DiagnosedSilenceableFailure diag =
           emitSilenceableError()
@@ -1350,7 +1350,8 @@ DiagnosedSilenceableFailure transform::SharedOutputToDistributedStyleOp::apply(
     parallelBlock->clear();
     builder.setInsertionPointAfterValue(retVal);
     auto allReduceOp = builder.create<ccl::AllReduceOp>(
-        retVal.getLoc(), retVal, /*dynamic_replica_groups*/ nullptr, reduceType,
+        retVal.getLoc(), retVal, /*dynamic_replica_groups*/ nullptr,
+        /*synchronous*/ rewriter.getBoolAttr(true), reduceType,
         /*replica_groups*/ replicaGroupAttrs, /*unique_id*/ nullptr);
 
     // create new merge op
@@ -1377,7 +1378,7 @@ DiagnosedSilenceableFailure transform::SharedOutputToDistributedStyleOp::apply(
     SmallVector<OpFoldResult> strides(rank, builder.getIndexAttr(1));
     builder.create<tensor::ParallelInsertSliceOp>(
         retVal.getLoc(), finalMergeOp->getResult(0),
-        loopOp.getOutputBlockArguments()[0], offsets, sizes, strides);
+        loopOp.getRegionIterArgs()[0], offsets, sizes, strides);
 
     // replace all uses of original merge op
     mergeOp->getResult(0).replaceAllUsesWith(loopOp->getResult(0));
@@ -1386,8 +1387,8 @@ DiagnosedSilenceableFailure transform::SharedOutputToDistributedStyleOp::apply(
     newFillOps.push_back(newFillOp);
     newLoopOps.push_back(loopOp);
   }
-  transformResults.set(getNewInit().cast<OpResult>(), newFillOps);
-  transformResults.set(getNewLoop().cast<OpResult>(), newLoopOps);
+  transformResults.set(cast<OpResult>(getNewInit()), newFillOps);
+  transformResults.set(cast<OpResult>(getNewLoop()), newLoopOps);
   return DiagnosedSilenceableFailure::success();
 }
 
@@ -1542,7 +1543,7 @@ ParseResult transform::FuseOperandsOp::parse(OpAsmParser &parser,
   if (!tileNumsAttr)
     return parser.emitError(opLoc)
            << "expected '" << tileNumsAttrName << "' attribute";
-  auto tileNumsArrayAttr = tileNumsAttr.dyn_cast<ArrayAttr>();
+  auto tileNumsArrayAttr = dyn_cast<ArrayAttr>(tileNumsAttr);
   if (!tileNumsArrayAttr)
     return parser.emitError(opLoc)
            << "'" << tileNumsAttrName << "' attribute must be an array";

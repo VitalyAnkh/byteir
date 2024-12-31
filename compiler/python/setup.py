@@ -14,8 +14,8 @@ version_txt = os.path.join(setup_path, "version.txt")
 version_file = os.path.join(setup_path, "byteir", "version.py")
 version = get_byteir_version_and_generate_versoin_file(version_txt, version_file, root_path, dev=False)
 
-maintainer = ""
-maintainer_email = ""
+maintainer = "ByteIR Team"
+maintainer_email = "byteir@bytedance.com"
 author = maintainer
 author_email = maintainer_email
 description = "use byteir python interface"
@@ -58,7 +58,8 @@ class CustomBuild(build_ext):
     target_dir = os.path.join(self.build_lib, "byteir")
     if os.path.exists(target_dir):
       shutil.rmtree(target_dir, ignore_errors=False, onerror=None)
-    shutil.copytree(python_package_dir, target_dir, symlinks=False)
+    ignore_pattern = shutil.ignore_patterns("*ByteIRCAPIAggregation.so")
+    shutil.copytree(python_package_dir, target_dir, symlinks=False, ignore=ignore_pattern)
     shutil.copyfile(version_file, os.path.join(target_dir, "version.py"))
 
 setup(

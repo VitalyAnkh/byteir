@@ -16,6 +16,7 @@ import torch
 from ..registry import register_test_case
 from ..framework import TestUtils
 
+# ==============================================================================
 
 class ElementwiseAddModule(torch.nn.Module):
 
@@ -30,6 +31,7 @@ class ElementwiseAddModule(torch.nn.Module):
 def ElementwiseAddModule_basic(module, tu: TestUtils):
     module.forward(tu.rand(4), tu.rand())
 
+# ==============================================================================
 
 class MatmulF16Module(torch.nn.Module):
 
@@ -45,6 +47,18 @@ def MatmulF16Module_basic(module, tu: TestUtils):
     module.forward(tu.rand(256, 512).to(torch.float16),
                    tu.rand(512, 1024).to(torch.float16))
 
+class MatmulTransposeModule(torch.nn.Module):
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, a, b):
+        c = torch.matmul(a, b)
+        return torch.transpose(c, 0, 1)
+
+@register_test_case(module_factory=lambda: MatmulTransposeModule())
+def MatmulTransposeModule_basic(module, tu: TestUtils):
+    module.forward(tu.rand(512, 256), tu.rand(256, 1024))
 
 class MatmulF32Module(torch.nn.Module):
 
@@ -86,3 +100,132 @@ class BatchMatmulAddF32Module(torch.nn.Module):
 @register_test_case(module_factory=lambda: BatchMatmulAddF32Module())
 def BatchMatmulAddF32Module_basic(module, tu: TestUtils):
     module.forward(tu.rand(2, 5, 6), tu.rand(2, 6, 10), tu.rand(2, 5, 10))
+
+# ==============================================================================
+
+class ReductionPaddingModule(torch.nn.Module):
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, a,):
+        return torch.ops.aten.mean(a)
+
+
+@register_test_case(module_factory=lambda: ReductionPaddingModule())
+def ReductionPaddingModule_basic(module, tu: TestUtils):
+    module.forward(tu.rand(1023))
+
+class ReductionOneSizeModule(torch.nn.Module):
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, a,):
+        return torch.ops.aten.mean(a,dim=(1))
+
+
+@register_test_case(module_factory=lambda: ReductionOneSizeModule())
+def ReductionOneSizeModule_basic(module, tu: TestUtils):
+    module.forward(tu.rand(1024,1))
+
+class  Large1DReductionModule(torch.nn.Module):
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, a,):
+        return torch.ops.aten.mean(a)
+
+@register_test_case(module_factory=lambda: Large1DReductionModule())
+def Large1DReductionModule_basic(module, tu: TestUtils):
+    module.forward(tu.rand(10000))
+
+class ParallelReductionModule(torch.nn.Module):
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, a,):
+        return torch.ops.aten.sum(a, 1)
+
+@register_test_case(module_factory=lambda: ParallelReductionModule())
+def ParallelReductionModule_basic(module, tu: TestUtils):
+    module.forward(tu.rand(10000, 1000))
+
+class ReductionParallelModule(torch.nn.Module):
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, a,):
+        return torch.ops.aten.sum(a, 0)
+
+@register_test_case(module_factory=lambda: ReductionParallelModule())
+def ReductionParallelModule_basic(module, tu: TestUtils):
+    module.forward(tu.rand(60, 10000))
+
+# ==============================================================================
+
+class RngUniformModule(torch.nn.Module):
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, a,):
+        a = torch.rand(32,10240000)*0.001
+        mean = torch.ops.aten.mean(a,dim=1)
+        std = torch.ops.aten.std(a,dim=1)
+        return torch.cat([mean,std])
+
+
+@register_test_case(module_factory=lambda: RngUniformModule())
+def RngUniformModule_basic(module, tu: TestUtils):
+    module.forward(tu.rand(32,10240000))
+
+class RngNormalModule(torch.nn.Module):
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, a,):
+        a = torch.randn(32,10240000)*0.001
+        mean = torch.ops.aten.mean(a,dim=1)
+        std = torch.ops.aten.std(a,dim=1)
+        return torch.cat([mean,std])
+
+
+@register_test_case(module_factory=lambda: RngNormalModule())
+def RngNormalModule_basic(module, tu: TestUtils):
+    module.forward(tu.rand(32,10240000))
+
+# ==============================================================================
+
+class ContiguousSliceModule(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+    def forward(self, x0):
+        r0 = torch.ops.aten.mul(x0, x0)
+        r1 = torch.ops.aten.slice(r0, 0, 0, 1, 1)
+        r2 = torch.ops.aten.slice(r0, 0, 1, 2, 1)
+        r3 = torch.ops.aten.slice(r0, 0, 2, 3, 1)
+        r4 = torch.ops.aten.add(r1, r2)
+        r5 = torch.ops.aten.div(r4, r3)
+        return r5
+
+@register_test_case(module_factory=lambda: ContiguousSliceModule())
+def ContiguousSliceModule_basic(module, tu: TestUtils):
+    module.forward(tu.rand(3, 64))
+
+# ==============================================================================
+
+class InsertSliceScatterModule(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x, src):
+        return torch.ops.aten.slice_scatter(x, src, dim=1, start=0, end=1, step=1)
+
+@register_test_case(module_factory=lambda: InsertSliceScatterModule())
+def InsertSliceScatterModule_basic(module, tu: TestUtils):
+    module.forward(tu.rand(6, 8, 5), tu.rand(6, 1, 5))

@@ -104,8 +104,11 @@ include(mhlo.cmake)
 
 include_directories(${BYTEIR_SRC_INCLUDE_DIR})
 include_directories(${BYTEIR_BIN_INCLUDE_DIR})
+include_directories(${BYTEIR_SRC_DIR}/dialects/include)
+include_directories(${BYTEIR_BINARY_DIR}/dialects/include)
 
-## Build all lib and include
+## Build all dialects, lib and include
+add_subdirectory(${BYTEIR_SRC_DIR}/dialects ${BYTEIR_BINARY_DIR}/dialects)
 add_subdirectory(${BYTEIR_SRC_DIR}/lib ${BYTEIR_BINARY_DIR}/lib)
 add_subdirectory(${BYTEIR_SRC_DIR}/include ${BYTEIR_BINARY_DIR}/include)
 
@@ -116,7 +119,7 @@ add_subdirectory(${BYTEIR_SRC_DIR}/tools ${BYTEIR_BINARY_DIR}/tools)
 if (BYTEIR_ENABLE_BINDINGS_PYTHON)
   include(MLIRDetectPythonEnv)
   mlir_configure_python_dev_packages()
-  add_subdirectory(${BYTEIR_SRC_DIR}/python ${CMAKE_BINARY_DIR}/python)
+  add_subdirectory(${BYTEIR_SRC_DIR}/python ${BYTEIR_BINARY_DIR}/python)
 endif()
 
 if(MSVC)

@@ -39,7 +39,9 @@ def GPUToNVVMExt : Pass<"gpu-to-nvvm-ext", "gpu::GPUModuleOp"> {
            "All memrefs must have static shape">,
     Option<"indexBitwidth", "index-bitwidth", "unsigned",
            /*default=kDeriveIndexBitwidthFromDataLayout*/"0",
-           "Bitwidth of the index type, 0 to use size of machine word">
+           "Bitwidth of the index type, 0 to use size of machine word">,
+    Option<"gpuArch", "gpu-arch", "std::string", /*default*/ "\"sm_80\"",
+           "Specificy the target nvgpu arch">
   ];
 }
 
@@ -61,7 +63,11 @@ def HloFusionToLinalg : Pass<"hlo-fusion-to-linalg", "func::FuncOp"> {
     Option<"enablePrimitiveOps", "enable-primitive-ops", "bool",
             /*default=*/"false",
             "Lower to primitive Linalg ops (map, reduce and "
-            "transpose) when possible, instead of linalg.generic">
+            "transpose) when possible, instead of linalg.generic">,
+    Option<"target", "target", "std::string", /*default*/ "",
+           "Specificy the target">,
+    Option<"arch", "arch", "std::string", /*default*/ "",
+           "Specificy the target arch">
   ];
 }
 
@@ -192,7 +198,10 @@ def GenPTXConfig : Pass<"gen-ptx-config", "func::FuncOp"> {
     Option<"useBarePtrCallConv", "use-bare-ptr-memref-call-conv", "bool",
            /*default=*/"false",
            "Replace memref arguments in GPU functions with bare pointers."
-           "All memrefs must have static shape">
+           "All memrefs must have static shape">,
+    Option<"fileName", "file-name", "std::string",
+           /*default*/"\"unified\"",
+           "The target ptx file for current PTXOp.">
   ];
 }
 
@@ -240,6 +249,22 @@ def CollectFuncToLLVM : Pass<"collect-func-to-llvm", "mlir::ModuleOp"> {
 }
 
 //===----------------------------------------------------------------------===//
+// ConvertHloToCat
+//===----------------------------------------------------------------------===//
+
+def ConvertHloToCat : Pass<"convert-hlo-to-cat", "func::FuncOp"> {
+  let summary = "convert hlo ops to cat op.";
+  let constructor = "mlir::createConvertHloToCatPass(/*validCatOps=*/{})";
+  let options = [
+    ListOption<"validCatOps", "valid-cat-ops", "std::string",
+               "List of cat ops could be converted to">,
+  ];
+  let dependentDialects = [
+    "mlir::cat::CatDialect",
+  ];
+}
+
+//===----------------------------------------------------------------------===//
 // FuseMhloToCat
 //===----------------------------------------------------------------------===//
 
@@ -264,6 +289,19 @@ def MhloToCat : Pass<"mhlo-to-cat", "func::FuncOp"> {
 }
 
 //===----------------------------------------------------------------------===//
+// HloToTensor
+//===----------------------------------------------------------------------===//
+
+def ConvertHloToTensor : Pass<"convert-hlo-to-tensor", "func::FuncOp"> {
+  let summary = "Convert hlo op to Tensor op.";
+  let constructor = "mlir::createConvertHloToTensorPass()";
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::tensor::TensorDialect",
+  ];  
+}
+
+//===----------------------------------------------------------------------===//
 // HloToByreTensor
 //===----------------------------------------------------------------------===//
 
@@ -273,12 +311,15 @@ def ConvertHloToByreTensor : Pass<"hlo-to-byre-tensor", "func::FuncOp"> {
   let dependentDialects = [
     "mlir::arith::ArithDialect",
     "mlir::byre::ByreDialect",
-    "mlir::tensor::TensorDialect"
+    "mlir::tensor::TensorDialect",
+    "mlir::shape::ShapeDialect",
   ];
 
   let options = [
     Option<"appendArgTypes", "append-arg-types", "bool", /*default=*/"false",
            "append arg types to Byre">,
+    Option<"enableTF32", "enable-tf32", "bool", /*default=*/"false",
+           "enable 1xTF32 on fp32 gemm/bmm">,
   ];
 }
 
@@ -291,8 +332,10 @@ def ConvertFuncToByreTensor : Pass<"func-to-byre-tensor", "ModuleOp"> {
   let summary = "Convert func op to byre tensor compute op.";
   let constructor = "mlir::createConvertFuncToByreTensorPass()";
   let dependentDialects = [
+    "mlir::arith::ArithDialect",
     "mlir::byre::ByreDialect",
-    "mlir::tensor::TensorDialect"
+    "mlir::tensor::TensorDialect",
+    "mlir::shape::ShapeDialect",
   ];
 
   let options = [
@@ -312,13 +355,6 @@ def ConvertGPULaunchFuncToByre : Pass<"gpu-launch-func-to-byre"> {
   let dependentDialects = [
     "mlir::byre::ByreDialect",
     "mlir::gpu::GPUDialect"
-  ];
-
-  let options = [
-    Option<"useBarePtrCallConv", "use-bare-ptr-memref-call-conv", "bool",
-          /*default=*/"false",
-          "Replace memref arguments in GPU functions with bare pointers."
-          "All memrefs must have static shape">,
   ];
 }
 
@@ -374,6 +410,19 @@ def MemrefCopyToLinalgPass :
     Option<"outlining", "outlining", "bool",
             /*default=*/"true",
             "Whether to outline the copy op to a new function">,
+  ];
+}
+
+//===----------------------------------------------------------------------===//
+// LcclToByre
+//===----------------------------------------------------------------------===//
+
+def ConvertLcclToByre : Pass<"lccl-to-byre", "func::FuncOp"> {
+  let summary = "Convert lccl op to byre op.";
+  let constructor = "mlir::createConvertLcclToByrePass()";
+  let dependentDialects = [
+    "mlir::byre::ByreDialect",
+    "mlir::lccl::LcclDialect"
   ];
 }
 

@@ -51,35 +51,41 @@ std::optional<TileConfig> getTileConfig(linalg::TransposeOp transposeOp) {
   SmallVector<std::pair<int64_t, int64_t>> splitPoints;
   SmallVector<int64_t> paddingDimensions;
 
-  if (!elementType.isa<IntegerType, FloatType>())
+  if (!isa<IntegerType, FloatType>(elementType))
     return std::nullopt;
 
-  auto dim0 = numLoops - 1;
-  auto dim1 = permutation[numLoops - 1];
+  auto lhsAffineMap =
+      cast<AffineMapAttr>(transposeOp.getIndexingMaps().getValue()[0])
+          .getValue();
+  auto dim1 = numLoops - 1;
+  auto dim0 = lhsAffineMap.getDimPosition(dim1);
 
-  if (inputShape[dim1] < 8 && inputShape[dim0] < 8)
+  auto dim1_size = inputShape[permutation[dim1]];
+  auto dim0_size = inputShape[permutation[dim0]];
+
+  if (dim1_size < 8 && dim0_size < 8)
     return std::nullopt;
 
-  if (inputShape[dim1] % 8 == 0) {
+  if (dim1_size % 8 == 0) {
     tileSizes[dim1] = 8;
-  } else if (inputShape[dim1] % 4 == 0) {
+  } else if (dim1_size % 4 == 0) {
     tileSizes[dim1] = 4;
   } else {
     paddingDimensions.push_back(dim1);
-    int64_t tilSize = dim1 < 4 ? 4 : 8;
+    int64_t tilSize = dim1_size < 4 ? 4 : 8;
     tileSizes[dim1] = tilSize;
-    int64_t splitPoint = inputShape[dim1] - inputShape[dim1] % tilSize;
+    int64_t splitPoint = dim1_size - dim1_size % tilSize;
     if (splitPoint > 0) {
       splitPoints.push_back(std::make_pair(dim1, splitPoint));
     }
   }
 
-  if (inputShape[dim0] % 8 == 0) {
+  if (dim0_size % 8 == 0) {
     tileSizes[dim0] = 8;
   } else {
     paddingDimensions.push_back(dim0);
     tileSizes[dim0] = 8;
-    int64_t splitPoint = inputShape[dim0] - inputShape[dim0] % 8;
+    int64_t splitPoint = dim0_size - dim0_size % 8;
     if (splitPoint > 0) {
       splitPoints.push_back(std::make_pair(dim0, splitPoint));
     }
@@ -127,7 +133,7 @@ void createTileAndVectorizeTransposeTransformImpl(OpPassManager &pm,
       interchange[i] = static_cast<int64_t>(i);
     }
     SmallVector<bool> scalableSizes(tileConfig.tileSizes.size(), false);
-    auto tileOp = b.create<transform::TileOp>(
+    auto tileOp = b.create<transform::TileUsingForOp>(
         /* tiledOp type*/ pdlType,
         /* loops type */
         SmallVector<Type>(tileConfig.tileSizes.size(), pdlType),
@@ -139,26 +145,28 @@ void createTileAndVectorizeTransposeTransformImpl(OpPassManager &pm,
     if (!tileConfig.paddingDimensions.empty()) {
       ArrayAttr paddingValues;
       auto &paddingType = tileConfig.paddingType;
-      if (paddingType.isa<FloatType>()) {
+      if (isa<FloatType>(paddingType)) {
         paddingValues = b.getArrayAttr(
             SmallVector<Attribute>(2, b.getFloatAttr(paddingType, 0.f)));
       } else {
-        assert(paddingType.isa<IntegerType>());
+        assert(isa<IntegerType>(paddingType));
         paddingValues = b.getArrayAttr(
             SmallVector<Attribute>(2, b.getIntegerAttr(paddingType, 0)));
       }
       b.create<transform::PadOp>(
-          TypeRange{pdlType, pdlType}, tileOp.getTiledLinalgOp(),
+          TypeRange{pdlType, pdlType, pdlType}, tileOp.getTiledLinalgOp(),
           /*padding_values=*/paddingValues,
           /*padding_dimensions=*/
           b.getI64ArrayAttr(tileConfig.paddingDimensions),
-          /*padToMultipleOf=*/ArrayAttr{},
+          /*pad_to_multiple_of=*/ValueRange{},
+          /*static_pad_to_multiple_of=*/b.getDenseI64ArrayAttr({}),
           /*pack_paddings=*/ArrayAttr{},
           /*transpose_paddings=*/ArrayAttr{},
-          /*copyBack=*/false);
+          /*copy_back_op=*/transform::PadOp::kCopyOpNone);
     }
-    b.create<transform::VectorizeOp>(outlineOp.getFunctions(),
-                                     /*vectorizePadding=*/true);
+    b.create<transform::VectorizeChildrenAndApplyPatternsOp>(
+        outlineOp.getFunctions(),
+        /*vectorizePadding=*/true);
     b.create<transform::InlineOp>(outlineOp.getCalls());
   };
 

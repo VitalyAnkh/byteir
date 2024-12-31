@@ -78,7 +78,7 @@ static FailureOr<TensorSliceParameters> getExpandedSliceParameters(
     ArrayRef<int64_t> collapsedShape, Value expandedValue) {
   MLIRContext *ctx = expandedValue.getContext();
   ArrayRef<int64_t> expandedShape =
-      expandedValue.getType().cast<ShapedType>().getShape();
+      cast<ShapedType>(expandedValue.getType()).getShape();
   TensorSliceParameters resSliceParameters;
   resSliceParameters.offsets.reserve(expandedShape.size());
   resSliceParameters.sizes.reserve(expandedShape.size());
@@ -120,14 +120,14 @@ static FailureOr<TensorSliceParameters> getExpandedSliceParameters(
       }
 
       for (auto &&expr : llvm::reverse(offsetExprs)) {
-        if (auto constExpr = expr.dyn_cast<AffineConstantExpr>()) {
+        if (auto constExpr = dyn_cast<AffineConstantExpr>(expr)) {
           resSliceParameters.offsets.push_back(
               b.getIndexAttr(constExpr.getValue()));
         } else {
           resSliceParameters.offsets.push_back(
               b.create<affine::AffineApplyOp>(
-                   loc, AffineMap::inferFromExprList({expr}).front(),
-                   collapsedOffset.dyn_cast<Value>())
+                   loc, AffineMap::inferFromExprList({expr}, ctx).front(),
+                   dyn_cast<Value>(collapsedOffset))
                   ->getResult(0));
         }
       }
@@ -205,7 +205,7 @@ static FailureOr<TensorSliceParameters> getExpandedSliceParameters(
       collapsedIntTileSize /= expandedShape[dim];
       productOfDimSizes *= expandedShape[dim];
     }
-    Value collapsedOffsetVal = collapsedOffset.dyn_cast<Value>();
+    Value collapsedOffsetVal = dyn_cast<Value>(collapsedOffset);
     if (!collapsedOffsetVal) {
       return failure();
     }
@@ -215,7 +215,7 @@ static FailureOr<TensorSliceParameters> getExpandedSliceParameters(
     resSliceParameters.sizes.push_back(b.getIndexAttr(collapsedIntTileSize));
     AffineMap map =
         AffineMap::inferFromExprList(
-            {mlir::getAffineDimExpr(0, ctx).floorDiv(productOfDimSizes)})
+            {mlir::getAffineDimExpr(0, ctx).floorDiv(productOfDimSizes)}, ctx)
             .front();
     resSliceParameters.offsets.push_back(
         b.create<affine::AffineApplyOp>(loc, map, collapsedOffsetVal)
@@ -238,7 +238,7 @@ static FailureOr<TensorSliceParameters> getCollapsedSliceParameters(
     ArrayRef<int64_t> expandedShape, Value collapsedValue) {
   MLIRContext *ctx = collapsedValue.getContext();
   ArrayRef<int64_t> collapsedShape =
-      collapsedValue.getType().cast<ShapedType>().getShape();
+      cast<ShapedType>(collapsedValue.getType()).getShape();
   TensorSliceParameters resSliceParameters;
   resSliceParameters.offsets.reserve(collapsedShape.size());
   resSliceParameters.sizes.reserve(collapsedShape.size());
@@ -275,7 +275,7 @@ static FailureOr<TensorSliceParameters> getCollapsedSliceParameters(
         if (!maybeIntOffset.has_value()) {
           offsetExpr = offsetExpr + getAffineDimExpr(ind++, ctx);
           offsetValues.push_back(
-              expandedSliceParams.offsets[dim].dyn_cast<Value>());
+              dyn_cast<Value>(expandedSliceParams.offsets[dim]));
         } else {
           offsetExpr = offsetExpr + getAffineConstantExpr(*maybeIntOffset, ctx);
         }
@@ -285,7 +285,7 @@ static FailureOr<TensorSliceParameters> getCollapsedSliceParameters(
           expandedSliceParams.sizes[expandedIndicesRef.back()]);
       resSliceParameters.offsets.push_back(
           b.create<affine::AffineApplyOp>(
-               loc, AffineMap::inferFromExprList({offsetExpr}).front(),
+               loc, AffineMap::inferFromExprList({offsetExpr}, ctx).front(),
                offsetValues)
               ->getResult(0));
       continue;
@@ -351,7 +351,7 @@ static FailureOr<TensorSliceParameters> getCollapsedSliceParameters(
     }
 
     Value firstNotOneOffsetVal =
-        expandedSliceParams.offsets[firstNotOneDim].dyn_cast<Value>();
+        dyn_cast<Value>(expandedSliceParams.offsets[firstNotOneDim]);
     if (!firstNotOneOffsetVal) {
       return failure();
     }
@@ -372,7 +372,7 @@ static FailureOr<TensorSliceParameters> getCollapsedSliceParameters(
     resSliceParameters.sizes.push_back(b.getIndexAttr(collaspedTileSize));
     AffineMap map =
         AffineMap::inferFromExprList(
-            {mlir::getAffineDimExpr(0, ctx) * productOfExpandedTileSize})
+            {mlir::getAffineDimExpr(0, ctx) * productOfExpandedTileSize}, ctx)
             .front();
     resSliceParameters.offsets.push_back(
         b.create<affine::AffineApplyOp>(loc, map, firstNotOneOffsetVal)
@@ -440,7 +440,7 @@ struct ExpandShapeOpTiling
         else {
           AffineMap map =
               AffineMap::inferFromExprList(
-                  {mlir::getAffineDimExpr(0, ctx).floorDiv(product)})
+                  {mlir::getAffineDimExpr(0, ctx).floorDiv(product)}, ctx)
                   .front();
           loopRanges[dynamicDim].size =
               b.create<affine::AffineApplyOp>(loc, map, dynDimSize)
@@ -507,8 +507,11 @@ struct ExpandShapeOpTiling
         }));
     auto resType = expandShapeOp.getResultType().clone(resShape);
 
-    Operation *tiledExpandShapeOp =
-        b.create<tensor::ExpandShapeOp>(loc, resType, tiledSrc, op->getAttrs());
+    // TODO(wujiawei): other tensor.expand_shape may need be handled.
+    Operation *tiledExpandShapeOp = b.create<tensor::ExpandShapeOp>(
+        loc, resType, tiledSrc, expandShapeOp.getReassociation(),
+        ValueRange(expandShapeOp.getOutputShape()),
+        expandShapeOp.getStaticOutputShapeAttr());
 
     return TilingResult{{tiledExpandShapeOp},
                         SmallVector<Value>(tiledExpandShapeOp->getResults())};
@@ -572,7 +575,7 @@ struct CollapseShapeOpTiling
           loopRanges[dim].size = dynDimSize;
         else {
           AffineMap map = AffineMap::inferFromExprList(
-                              {mlir::getAffineDimExpr(0, ctx) * product})
+                              {mlir::getAffineDimExpr(0, ctx) * product}, ctx)
                               .front();
           loopRanges[dim].size =
               b.create<affine::AffineApplyOp>(loc, map, dynDimSize)

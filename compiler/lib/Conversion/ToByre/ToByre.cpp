@@ -31,8 +31,8 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Builders.h"
-#include "mlir/IR/FunctionInterfaces.h"
 #include "mlir/IR/Matchers.h"
+#include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Parser/Parser.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
@@ -153,6 +153,7 @@ public:
     auto key = getByreKey(nameAttr.getValue(), argTypes, resTypes,
                           effectiveAppendArgTypes);
 
+    // memref level, so convert to ComputeOp
     mlir::byre::ComputeOp computeOp =
         rewriter.replaceOpWithNewOp<byre::ComputeOp>(
             op, TypeRange{}, key, operands, memoryEffectsAttr);
@@ -326,7 +327,7 @@ static inline void relocateFuncOpResults(func::FuncOp func,
               opBuilder.getI64IntegerAttr(
                   removeAllocOps[allocOp.getOperation()].getArgNumber()));
         }
-      } else if (retVal.isa<BlockArgument>()) {
+      } else if (isa<BlockArgument>(retVal)) {
         // if return value is input from entry function, insert a memref.copy
         opBuilder.setInsertionPoint(retOp);
         opBuilder.create<memref::CopyOp>(
@@ -335,7 +336,7 @@ static inline void relocateFuncOpResults(func::FuncOp func,
         func.setArgAttr(idx + retValIter.index(),
                         ByreDialect::getEntryPointFuncArgAliasIndexAttrName(),
                         opBuilder.getI64IntegerAttr(
-                            retVal.cast<BlockArgument>().getArgNumber()));
+                            cast<BlockArgument>(retVal).getArgNumber()));
       } else {
         // if return value not alloced in entry function (like alloced in inner
         // function), insert a memref.copy.
@@ -370,7 +371,7 @@ static inline void rewriteCallOpsForFuncOp(ArrayRef<func::CallOp> calls) {
     // change result to alloc
     for (auto r : callOp.getResults()) {
       auto alloc = opBuilder.create<memref::AllocOp>(
-          callOp.getLoc(), r.getType().dyn_cast<MemRefType>());
+          callOp.getLoc(), dyn_cast<MemRefType>(r.getType()));
       r.replaceAllUsesExcept(alloc.getResult(), callOp);
       oprands.push_back(alloc.getResult());
     }
@@ -513,7 +514,7 @@ static inline void rewriteByreResultAttrsToFuncResultAttr(func::FuncOp func) {
       return;
     for (size_t i = 0; i < newResultAttrs.size(); ++i) {
       if (auto newResultAttrsDict =
-              newResultAttrs[i].dyn_cast_or_null<DictionaryAttr>()) {
+              dyn_cast_or_null<DictionaryAttr>(newResultAttrs[i])) {
         NamedAttrList originAttrs = func.getResultAttrs(i);
         originAttrs.append(newResultAttrsDict.getValue());
         func.setResultAttrs(i, originAttrs.getDictionary(func->getContext()));

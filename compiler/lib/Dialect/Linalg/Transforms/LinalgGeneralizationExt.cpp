@@ -64,12 +64,12 @@ struct LinalgGeneralizationExtPattern
     if (failed(generalizeNamedOpPrecondition(linalgOp)))
       return rewriter.notifyMatchFailure(linalgOp, "preconditions not met");
 
-    SmallVector<Value> inputs = linalgOp.getDpsInputOperands();
-    SmallVector<Value> outputs = linalgOp.getDpsInitOperands();
+    SmallVector<Value> inputs = linalgOp.getDpsInputs();
+    SmallVector<Value> outputs = linalgOp.getDpsInits();
     SmallVector<AffineMap> indexingMaps = linalgOp.getIndexingMapsArray();
     SmallVector<utils::IteratorType> iterators =
         linalgOp.getIteratorTypesArray();
-    SmallVector<Type> resultTypes = linalgOp.hasTensorSemantics()
+    SmallVector<Type> resultTypes = linalgOp.hasPureTensorSemantics()
                                         ? TypeRange(ValueRange(outputs))
                                         : TypeRange{};
 
@@ -86,7 +86,7 @@ struct LinalgGeneralizationExtPattern
     } else {
       auto &&newBlockArgTypes = llvm::to_vector(
           llvm::map_range(genericOp->getOperandTypes(), [](Type t) {
-            if (auto shapedType = t.dyn_cast_or_null<ShapedType>()) {
+            if (auto shapedType = dyn_cast_or_null<ShapedType>(t)) {
               return shapedType.getElementType();
             }
             return t;

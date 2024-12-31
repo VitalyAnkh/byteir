@@ -53,7 +53,7 @@ static LogicalResult promoteTensorValue(OpBuilder &b, mlir::Value val,
   // TODO: use placeType to support space and/or alloca
 
   // only support Tensor only
-  auto valType = val.getType().dyn_cast<TensorType>();
+  auto valType = dyn_cast<TensorType>(val.getType());
 
   if (!valType) {
     return failure();
@@ -61,12 +61,12 @@ static LogicalResult promoteTensorValue(OpBuilder &b, mlir::Value val,
 
   // support DestinationStyleOpInterface and TensorSemantics only
   auto destOp = val.getDefiningOp<DestinationStyleOpInterface>();
-  if (!destOp || !destOp.hasTensorSemantics()) {
+  if (!destOp || !destOp.hasPureTensorSemantics()) {
     return failure();
   }
 
   // override DefiningOp init with an empty
-  auto opOperand = destOp.getTiedOpOperand(val.cast<OpResult>());
+  auto opOperand = destOp.getTiedOpOperand(cast<OpResult>(val));
   b.setInsertionPoint(destOp);
   // create an empty for overriding
   tensor::EmptyOp emptyOp = b.create<tensor::EmptyOp>(
@@ -100,7 +100,7 @@ static void dataPlaceImpl(OpBuilder &b, LinalgOp op) {
 
   if (auto arrayAttr = op->getAttrOfType<ArrayAttr>(getDataPlaceAttrName())) {
     for (auto attr : arrayAttr) {
-      if (auto intAttr = attr.dyn_cast<IntegerAttr>()) {
+      if (auto intAttr = dyn_cast<IntegerAttr>(attr)) {
         memSpaces.push_back(intAttr.getInt());
       } else {
         memSpaces.push_back(getUnplacedSpace());
@@ -113,7 +113,7 @@ static void dataPlaceImpl(OpBuilder &b, LinalgOp op) {
   int idx = 0;
 
   // handle inputs
-  for (Value input : SmallVector<Value>(op.getDpsInputOperands())) {
+  for (Value input : op.getDpsInputs()) {
     int64_t space = getSpace(memSpaces, idx++);
 
     if (space == getUnplacedSpace()) {
@@ -134,7 +134,7 @@ static void dataPlaceImpl(OpBuilder &b, LinalgOp op) {
 
   // handle outputs
   SmallVector<bool, 4> outputReplaced;
-  for (auto output : SmallVector<Value>(op.getDpsInitOperands())) {
+  for (auto output : op.getDpsInits()) {
     int64_t space = getSpace(memSpaces, idx++);
 
     if (space == getUnplacedSpace()) {
@@ -162,7 +162,7 @@ static void dataPlaceImpl(OpBuilder &b, LinalgOp op) {
 
   idx = 0;
   int64_t numInputs = op.getNumDpsInputs();
-  for (auto output : SmallVector<Value>(op.getDpsInitOperands())) {
+  for (auto output : op.getDpsInits()) {
     if (outputReplaced[idx]) {
       // copy output
       b.create<linalg::CopyOp>(loc, operands[numInputs + idx], output);
@@ -248,7 +248,7 @@ void mlir::genericElementwiseTensorCollector(
 
   auto linalgGeneric = dyn_cast<linalg::GenericOp>(op);
   // only support GenericOp with tesnor now
-  if (!linalgGeneric || !linalgGeneric.hasTensorSemantics()) {
+  if (!linalgGeneric || !linalgGeneric.hasPureTensorSemantics()) {
     return;
   }
 

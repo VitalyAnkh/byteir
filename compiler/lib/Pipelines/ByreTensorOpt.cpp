@@ -18,6 +18,7 @@
 #include "byteir/Pipelines/ByreTensorOpt.h"
 
 #include "byteir/Conversion/FuncToByre/FuncToByre.h"
+#include "byteir/Conversion/HloToByreTensor/HloToByreCustom.h"
 #include "byteir/Conversion/HloToByreTensor/HloToByreTensor.h"
 #include "byteir/Dialect/Byre/ByreDialect.h"
 #include "byteir/Dialect/Byre/Passes.h"
@@ -33,7 +34,7 @@ using namespace mlir::byre;
 
 namespace {
 void createByreTensorOptPipelineImpl(OpPassManager &pm, std::string entryFunc,
-                                     bool appendArgTypes) {
+                                     bool appendArgTypes, bool enableTF32) {
   pm.addPass(createFuncTagPass(
       /*anchorTag=*/"",
       getAttrPlaceholderName(ByreDialect::getEntryPointFunctionAttrName()),
@@ -43,7 +44,9 @@ void createByreTensorOptPipelineImpl(OpPassManager &pm, std::string entryFunc,
   pm.addPass(createSymbolDCEPass());
   pm.addPass(createCanonicalizerPass());
   pm.addNestedPass<func::FuncOp>(
-      createConvertHloToByreTensorPass(appendArgTypes));
+      createConvertHloToByreCustomPass(getCudaByreCustomConfig()));
+  pm.addNestedPass<func::FuncOp>(
+      createConvertHloToByreTensorPass(appendArgTypes, enableTF32));
   pm.addPass(createCanonicalizerPass());
 }
 } // namespace
@@ -51,5 +54,6 @@ void createByreTensorOptPipelineImpl(OpPassManager &pm, std::string entryFunc,
 void mlir::createByreTensorOptPipeline(
     OpPassManager &pm, const ByreTensorOptPipelineOptions &options) {
   invokeOpPassPipelineBuilder(createByreTensorOptPipelineImpl, pm,
-                              options.entryFunc, options.appendArgTypes);
+                              options.entryFunc, options.appendArgTypes,
+                              options.enableTF32);
 }

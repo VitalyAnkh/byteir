@@ -20,6 +20,7 @@
 #include "brt/core/common/common.h"
 #include "brt/core/common/status.h"
 #include "brt/core/framework/dtype.h"
+#include "brt/core/framework/memory_info.h"
 #include "brt/core/framework/value.h"
 #include "brt/core/ir/graph_info.h"
 #include "brt/core/ir/ir.h"
@@ -45,7 +46,7 @@ struct GroupAllocationHook {
   std::vector<size_t> tensor_indexes;
   // return an array of AsyncValues, each AsyncValue is mapping to the
   // corresponding tensor index
-  // Note: this method could be called more than once due to mulitple execution
+  // Note: this method could be called more than once due to multiple execution
   // frameworks
   std::function<std::vector<AsyncValue>(void)> alloc_f;
   // receive an array of AsyncValues as argument, each AsyncValue is mapping to
@@ -245,7 +246,9 @@ public:
 
   virtual void FinishIOBinding() = 0;
   virtual void AllocIntermediate() = 0;
-  virtual void BindArg(size_t idx, const void *) = 0;
+  virtual void
+  BindArg(size_t idx, const void *,
+          BrtOwnershipType owership = BrtOwnershipType::OwnedByExternal) = 0;
   virtual void *GetArg(size_t) = 0;
 
   // TODO: unify tensor and scalar to generic Value class
@@ -386,7 +389,9 @@ public:
 
   void FinishIOBinding() override;
   void AllocIntermediate() override;
-  void BindArg(size_t idx, const void *) override;
+  void BindArg(
+      size_t idx, const void *,
+      BrtOwnershipType owership = BrtOwnershipType::OwnedByExternal) override;
   void *GetArg(size_t) override;
 
   Scalar GetScalarImpl(size_t) override;

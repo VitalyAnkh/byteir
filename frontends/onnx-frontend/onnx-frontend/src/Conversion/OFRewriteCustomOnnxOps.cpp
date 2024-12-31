@@ -28,6 +28,8 @@ namespace {
 
 /// ByteIR custom call target names
 #define CALL_TARGET_NAME_PREFIX "byteir."
+/// ONNX custom call target names
+#define ONNX_CALL_TARGET_PREFIX "onnx."
 
 // clang-format off
 // get custom call target name
@@ -46,22 +48,22 @@ Value createQuantizeDequantize(PatternRewriter &rewriter, Location loc,
                                ValueRange inputs, StringAttr func_name, ValueRange outputs) {
   Value output = outputs[0];
   RankedTensorType outputType =
-      output.getType().dyn_cast_or_null<RankedTensorType>();
+      dyn_cast_or_null<RankedTensorType>(output.getType());
   assert(outputType != nullptr &&
          "Quantize/Dequantize's output type must be ranked");
   Value scale = inputs[1];
   RankedTensorType scaleType =
-      scale.getType().dyn_cast_or_null<RankedTensorType>();
+      dyn_cast_or_null<RankedTensorType>(scale.getType());
   assert(scaleType != nullptr &&
          "Quantize/Dequantize's scale type must be ranked");
   assert(scaleType.getRank() <= 1 &&
          "Quantize/Dequantize's scale rank should be 0 or 1");
   Value zeropoint = inputs[2];
   RankedTensorType zeropointType =
-      zeropoint.getType().dyn_cast_or_null<RankedTensorType>();
+      dyn_cast_or_null<RankedTensorType>(zeropoint.getType());
   assert(zeropointType != nullptr &&
          "Quantize/Dequantize's zeropoint type must be ranked");
-  Type zpElementType = zeropointType.getElementType(); 
+  Type zpElementType = zeropointType.getElementType();
   // rewrite output type to zpElementType for quantize
   if (func_name == "quantize")
     outputType = RankedTensorType::get(
@@ -69,18 +71,72 @@ Value createQuantizeDequantize(PatternRewriter &rewriter, Location loc,
 
   std::string call_target_name = std::string(CALL_TARGET_NAME_PREFIX) +
                                  func_name.str();
-  mhlo::CustomCallOp customCallOp = rewriter.create<mlir::mhlo::CustomCallOp>(
+  stablehlo::CustomCallOp customCallOp = rewriter.create<mlir::stablehlo::CustomCallOp>(
       loc, llvm::ArrayRef<Type>{outputType},
       inputs, call_target_name, false,
       rewriter.getStringAttr(""),
-      mhlo::CustomCallApiVersion::API_VERSION_ORIGINAL,
+      stablehlo::CustomCallApiVersion::API_VERSION_ORIGINAL,
       rewriter.getArrayAttr(llvm::ArrayRef<mlir::Attribute>{}),
-      mhlo::CustomCallSchedule::NONE, nullptr, nullptr,
+      nullptr, nullptr,
       rewriter.getArrayAttr(llvm::ArrayRef<mlir::Attribute>{}));
   DictionaryAttrWrapper attrs(rewriter.getContext());
   customCallOp->setAttr(BYTEIR_ATTRS, getCleanAttr(attrs));
   return customCallOp.getResults()[0];
 }
+
+//===----------------------------------------------------------------------===//
+// Custom
+//===----------------------------------------------------------------------===//
+
+struct ONNXCustomOpLowering : public RewritePattern {
+  ONNXCustomOpLowering(MLIRContext *ctx)
+      : RewritePattern("onnx.Custom", 1, ctx, {}) {}
+
+  LogicalResult matchAndRewrite(::mlir::Operation *op,
+      ::mlir::PatternRewriter &rewriter) const override {
+    ONNXCustomOp customOp = dyn_cast_or_null<::mlir::ONNXCustomOp>(op);
+    Location loc = op->getLoc();
+    ValueRange operands = op->getOperands();
+    // Prepare outputs
+    SmallVector<Type, 4> outputTypes;
+    for (size_t idx = 0; idx < op->getResultTypes().size(); idx++) {
+      Type ty = op->getResultTypes()[idx];
+      outputTypes.emplace_back(ty);
+    }
+
+    DictionaryAttrWrapper attrs(rewriter.getContext());
+    // Handle the attributes: exclude the attributes used for analysis
+    // function_name is passed explicitly. Others may include shape inference
+    std::vector<std::string> excludeStrings = {"function_name",
+        "shape_infer_pattern", "inputs_for_infer", "output_element_type"};
+    std::string func_name;
+    for (NamedAttribute namedAttr : customOp->getAttrs()) {
+      std::string attrName = namedAttr.getName().getValue().str();
+      Attribute attr = namedAttr.getValue();
+      if (attrName == "function_name") {
+        func_name = cast<StringAttr>(attr).str();
+      } else if (std::find(excludeStrings.begin(), excludeStrings.end(), attrName) ==
+          excludeStrings.end()) {
+        attrs.setAttr(attrName, attr);
+      }
+    }
+
+    std::string call_target_name = std::string(ONNX_CALL_TARGET_PREFIX) + func_name;
+    stablehlo::CustomCallOp customCallOp = rewriter.create<mlir::stablehlo::CustomCallOp>(
+        loc, outputTypes,
+        operands, call_target_name, false,
+        rewriter.getStringAttr(""),
+        stablehlo::CustomCallApiVersion::API_VERSION_ORIGINAL,
+        rewriter.getArrayAttr(llvm::ArrayRef<mlir::Attribute>{}),
+        nullptr, nullptr,
+        rewriter.getArrayAttr(llvm::ArrayRef<mlir::Attribute>{}));
+
+    customCallOp->setAttr(BYTEIR_ATTRS, getCleanAttr(attrs));
+
+    rewriter.replaceOp(op, customCallOp);
+    return success();
+  }
+};
 
 #include "onnx-frontend/src/Conversion/OFRewriteCustomOnnxOps.inc"
 
@@ -109,6 +165,9 @@ struct OFRewriteCustomOnnxOpsPass
         patterns.add(std::move(pattern));
       }
     }
+
+    patterns.insert<ONNXCustomOpLowering>(context);
+
     if (failed(applyPatternsAndFoldGreedily(function, std::move(patterns)))) {
       signalPassFailure();
     }

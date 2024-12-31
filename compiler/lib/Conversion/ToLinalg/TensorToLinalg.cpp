@@ -123,7 +123,7 @@ public:
                   ConversionPatternRewriter &rewriter) const final {
     auto ctx = op.getContext();
     auto resultTy = op.getResultType();
-    auto inputTy = op.getOperand().getType().cast<TensorType>();
+    auto inputTy = cast<TensorType>(op.getOperand().getType());
     int64_t nloops = inputTy.getRank();
 
     // Find input/output values and types.
@@ -215,8 +215,7 @@ LogicalResult mlir::simplifyTensorReshapeLikeOp(RewriterBase &rewriter,
     auto expandOutputShape = expandResultTy.getShape();
   } else if (auto collapseShapeOp =
                  src.getDefiningOp<tensor::ExpandShapeOp>()) {
-    auto collpaseInputTy =
-        collapseShapeOp.getOperand().getType().cast<TensorType>();
+    auto collpaseInputTy = cast<TensorType>(collapseShapeOp.getSrc().getType());
     auto collpaseInputShape = collpaseInputTy.getShape();
     auto maps = getLinearizedReassociationMaps(
         ctx, collapseShapeOp.getReassociationMaps(),

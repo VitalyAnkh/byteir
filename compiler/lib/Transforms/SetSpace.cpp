@@ -62,7 +62,7 @@ const std::string &getSpace(ArrayRef<std::string> spaces, size_t offset) {
 }
 
 bool isEmptyStringAttr(Attribute attr) {
-  if (auto strAttr = attr.dyn_cast_or_null<StringAttr>()) {
+  if (auto strAttr = dyn_cast_or_null<StringAttr>(attr)) {
     return strAttr.strref().empty();
   }
   return false;
@@ -78,7 +78,7 @@ bool isFuncCorrectSpace(func::FuncOp func, size_t offset, Attribute space,
     argType = funcType.getResult(offset);
   }
 
-  if (auto memRefTy = argType.dyn_cast<MemRefType>()) {
+  if (auto memRefTy = dyn_cast<MemRefType>(argType)) {
     return memRefTy.getMemorySpace() == space;
   }
   return false;
@@ -99,6 +99,29 @@ Attribute getOrCreateSpaceAttr(ModuleOp m, llvm::StringRef name) {
   return StringAttr::get(m.getContext(), name);
 }
 
+memref::AllocOp createNewAllocWithDstMemrefTy(OpBuilder &b, Location loc,
+                                              Value input,
+                                              MemRefType dstMemrefTy) {
+  // if the definingOp of input  is also a AllocOp,
+  // reuse the operand to avoid redudant dimOp under dynamic shape.
+  if (auto preAlloc = input.getDefiningOp<memref::AllocOp>()) {
+    return b.create<memref::AllocOp>(loc, dstMemrefTy, preAlloc.getOperands());
+  }
+
+  int64_t rank = dstMemrefTy.getRank();
+  SmallVector<Value> dynamicDims;
+  // Get the dynamic dims of dstType
+  for (int i = 0; i < rank; ++i) {
+    if (!dstMemrefTy.isDynamicDim(i))
+      continue;
+    Value index = b.create<arith::ConstantIndexOp>(loc, i);
+    Value dimOp = b.create<memref::DimOp>(loc, input, index);
+    dynamicDims.push_back(dimOp);
+  }
+  auto newAlloc = b.create<memref::AllocOp>(loc, dstMemrefTy, dynamicDims);
+  return newAlloc;
+}
+
 // creat copy for input Arg
 /* Op(A)
 => newA = Alloc() in dstMemrefTy (new space);
@@ -111,7 +134,7 @@ Value createCopyInputArg(Operation *op, Value oldArg, MemRefType dstMemrefTy,
                          DenseMap<CopyType_t, Value> &copyPairToCopyTargets) {
   OpBuilder b(op);
   auto loc = op->getLoc();
-  auto newAlloc = b.create<memref::AllocOp>(loc, dstMemrefTy);
+  auto newAlloc = createNewAllocWithDstMemrefTy(b, loc, oldArg, dstMemrefTy);
   auto newArg = newAlloc.getResult();
   b.create<memref::CopyOp>(loc, oldArg, newArg);
 
@@ -134,9 +157,25 @@ Value createCopyReturn(Operation *op, Value oldArg, MemRefType dstMemrefTy,
   OpBuilder b(op);
   b.setInsertionPointAfter(op);
   auto loc = op->getLoc();
-  auto newAlloc = b.create<memref::AllocOp>(loc, dstMemrefTy);
+  auto oriOldArgUsers = oldArg.getUsers();
+  auto newAlloc = createNewAllocWithDstMemrefTy(b, loc, oldArg, dstMemrefTy);
   auto newArg = newAlloc.getResult();
-  oldArg.replaceAllUsesExcept(newArg, op);
+  SmallPtrSet<Operation *, 4> excepts;
+  // if the shape of oldArg is dynamic, oldArg is used for DimOp when create a
+  // new AllocOp. Therefore replacement needs to exclude these operators to
+  // avoid circular dependencies
+  for (auto curUser : oldArg.getUsers()) {
+    bool needExclude = true;
+    for (auto oldUser : oriOldArgUsers) {
+      if (oldUser == curUser) {
+        needExclude = false;
+      }
+    }
+    if (needExclude) {
+      excepts.insert(curUser);
+    }
+  }
+  oldArg.replaceAllUsesExcept(newArg, excepts);
   b.create<memref::CopyOp>(loc, oldArg, newArg);
   CopyType_t copyKey = {oldArg, dstMemrefTy.getMemorySpace()};
   copyPairToCopyTargets.try_emplace(copyKey, newArg);
@@ -160,7 +199,7 @@ Value createCopyOutputArg(Operation *op, Value oldArg, MemRefType dstMemrefTy,
   // create copy after op
   b.setInsertionPointAfter(op);
   b.create<memref::CopyOp>(loc, newArg, oldArg);
-  auto srcSpaceAttr = oldArg.getType().dyn_cast<MemRefType>().getMemorySpace();
+  auto srcSpaceAttr = dyn_cast<MemRefType>(oldArg.getType()).getMemorySpace();
   CopyType_t copyKey = {newArg, srcSpaceAttr};
   copyPairToCopyTargets.try_emplace(copyKey, oldArg);
   return newArg;
@@ -179,7 +218,7 @@ Value createCopyArg(Operation *op, Value oldArg, MemRefType dstMemrefTy,
     return createCopyOutputArg(op, oldArg, dstMemrefTy, copyPairToCopyTargets);
   }
 
-  return Value();
+  assert(false && "unknown ArgSideEffectType");
 }
 
 // update function types for args recursively
@@ -210,7 +249,7 @@ void updateFuncArgTypes(
   // update argType
   auto &argType = newUpdateTypes.first[offset];
 
-  if (auto MemrefTy = argType.dyn_cast<MemRefType>()) {
+  if (auto MemrefTy = dyn_cast<MemRefType>(argType)) {
     auto newArgType = cloneMemRefTypeWithMemSpace(MemrefTy, spaceAttr);
     argType = newArgType;
   }
@@ -222,7 +261,17 @@ void updateFuncArgTypes(
     arg.setType(argType);
 
     // handle users
-    for (auto user : arg.getUsers()) {
+    llvm::DenseMap<Operation *, size_t> opOrder;
+    size_t idx = 0;
+    // Get the order of all operations
+    func.walk([&](Operation *op) { opOrder[op] = idx++; });
+    llvm::SmallVector<Operation *> argUsers = llvm::to_vector(arg.getUsers());
+    // Sort the users of this arg according to order
+    llvm::sort(argUsers, [&](Operation *lhs, Operation *rhs) {
+      return opOrder[lhs] < opOrder[rhs];
+    });
+
+    for (auto user : argUsers) {
 
       // handle call
       if (auto callOp = dyn_cast<CallOp>(user)) {
@@ -249,7 +298,7 @@ void updateFuncArgTypes(
                 auto argSEType = analysis->getType(user, i);
                 auto newArg = createCopyArg(
                     user, arg,
-                    privateFuncType.getInput(i).dyn_cast<MemRefType>(),
+                    dyn_cast<MemRefType>(privateFuncType.getInput(i)),
                     privateSpaceAttr, copyPairToCopyTargets, argSEType);
                 callOp.setOperand(i, newArg);
               } else {
@@ -305,7 +354,7 @@ void updateFuncReturnTypes(
   // update retType
   auto &retType = newUpdateTypes.second[offset];
 
-  if (auto MemrefTy = retType.dyn_cast<MemRefType>()) {
+  if (auto MemrefTy = dyn_cast<MemRefType>(retType)) {
     auto newRetType = cloneMemRefTypeWithMemSpace(MemrefTy, spaceAttr);
     retType = newRetType;
   }
@@ -320,7 +369,7 @@ void updateFuncReturnTypes(
 
         if (isFuncNotCompatiableWithSpace(anotherFunc, spaceAttr)) {
           // insert a CopyFrom after the CallOp
-          auto retMemrefTy = retType.dyn_cast<MemRefType>();
+          auto retMemrefTy = dyn_cast<MemRefType>(retType);
 
           for (unsigned i = 0; i < callOp.getNumResults(); ++i) {
             if (ret != callOp.getResult(i)) {
@@ -361,10 +410,53 @@ void updateOpTypes(FuncOp func, ModuleOp m,
   // rewrite all types
   for (auto &block : func.getBlocks()) {
     for (auto &op : block.without_terminator()) {
-      if (auto opSpaceAttr = op.getAttrOfType<StringAttr>(SPACE_ATTR_NAME)) {
+      if (auto viewLikeOp = llvm::dyn_cast<ViewLikeOpInterface>(op)) {
+        auto src = viewLikeOp.getViewSource();
+        auto srcType = dyn_cast<MemRefType>(src.getType());
+        if (!srcType)
+          continue;
+        auto srcSpace = srcType.getMemorySpace();
+        if (!srcSpace)
+          continue;
+
+        auto currSpace = srcSpace;
+        // if op has space attribute, use it as memory space
+        if (auto opSpaceAttr = op.getAttrOfType<StringAttr>(SPACE_ATTR_NAME)) {
+          if (srcSpace != opSpaceAttr) {
+            // insert copy if src space is different with spaceAttr
+            auto newSrcType = cloneMemRefTypeWithMemSpace(srcType, opSpaceAttr);
+            auto newArg = createCopyInputArg(&op, src, newSrcType, opSpaceAttr,
+                                             copyPairToCopyTargets);
+            op.setOperand(0, newArg);
+            currSpace = opSpaceAttr;
+          }
+        }
+        // propagate memory space from currSpace to dest
+        for (auto result : op.getResults()) {
+          auto dstType = dyn_cast<MemRefType>(result.getType());
+          if (!dstType)
+            continue;
+          auto dstSpace = dstType.getMemorySpace();
+
+          if (dstSpace) {
+            if (dstSpace != currSpace) {
+              // insert copy if dst space was already set to different space
+              auto newDstType = cloneMemRefTypeWithMemSpace(dstType, currSpace);
+              result.setType(newDstType);
+              createCopyReturn(viewLikeOp, result, dstType,
+                               copyPairToCopyTargets);
+            }
+          } else {
+            // set to spaceAttr if no space
+            auto newDstType = cloneMemRefTypeWithMemSpace(dstType, currSpace);
+            result.setType(newDstType);
+          }
+        }
+      } else if (auto opSpaceAttr =
+                     op.getAttrOfType<StringAttr>(SPACE_ATTR_NAME)) {
         for (unsigned i = 0; i < op.getNumOperands(); ++i) {
           auto operand = op.getOperand(i);
-          if (auto MemrefTy = operand.getType().dyn_cast<MemRefType>()) {
+          if (auto MemrefTy = dyn_cast<MemRefType>(operand.getType())) {
             auto curSpace = MemrefTy.getMemorySpace();
 
             if (curSpace == nullptr) {
@@ -393,7 +485,7 @@ void updateOpTypes(FuncOp func, ModuleOp m,
 
         // set operand type
         for (auto operand : op.getOperands()) {
-          if (auto MemrefTy = operand.getType().dyn_cast<MemRefType>()) {
+          if (auto MemrefTy = dyn_cast<MemRefType>(operand.getType())) {
             auto newOperandType =
                 cloneMemRefTypeWithMemSpace(MemrefTy, opSpaceAttr);
             operand.setType(newOperandType);
@@ -402,41 +494,10 @@ void updateOpTypes(FuncOp func, ModuleOp m,
 
         // set result type in case it has
         for (auto result : op.getResults()) {
-          if (auto MemrefTy = result.getType().dyn_cast<MemRefType>()) {
+          if (auto MemrefTy = dyn_cast<MemRefType>(result.getType())) {
             auto newOperandType =
                 cloneMemRefTypeWithMemSpace(MemrefTy, opSpaceAttr);
             result.setType(newOperandType);
-          }
-        }
-      } else if (auto viewLikeOp = llvm::dyn_cast<ViewLikeOpInterface>(op)) {
-        // for view like op, we need propagate memory space from source to dest
-        auto src = viewLikeOp.getViewSource();
-        if (auto srcType = src.getType().dyn_cast<MemRefType>()) {
-          auto srcSpace = srcType.getMemorySpace();
-          if (!srcSpace)
-            continue;
-
-          for (auto result : op.getResults()) {
-            auto dstType = result.getType().dyn_cast<MemRefType>();
-            if (!dstType)
-              continue;
-
-            auto dstSpace = dstType.getMemorySpace();
-
-            if (dstSpace) {
-              if (dstSpace != srcSpace) {
-                // insert copy if dst space was already set to different space
-                auto newDstType =
-                    cloneMemRefTypeWithMemSpace(dstType, srcSpace);
-                result.setType(newDstType);
-                createCopyReturn(viewLikeOp, result, dstType,
-                                 copyPairToCopyTargets);
-              }
-            } else {
-              // set to src space if no space
-              auto newDstType = cloneMemRefTypeWithMemSpace(dstType, srcSpace);
-              result.setType(newDstType);
-            }
           }
         }
       }
@@ -446,10 +507,9 @@ void updateOpTypes(FuncOp func, ModuleOp m,
   // respect to function return type
   for (auto &&retOp : func.getOps<ReturnOp>()) {
     for (auto &&opOperand : retOp->getOpOperands()) {
-      auto operandType = opOperand.get().getType().dyn_cast<MemRefType>();
-      auto resultType = func.getFunctionType()
-                            .getResult(opOperand.getOperandNumber())
-                            .dyn_cast<MemRefType>();
+      auto operandType = dyn_cast<MemRefType>(opOperand.get().getType());
+      auto resultType = dyn_cast<MemRefType>(
+          func.getFunctionType().getResult(opOperand.getOperandNumber()));
       if (!resultType || !operandType)
         continue;
 
@@ -646,7 +706,7 @@ struct SetAllSpacePass : public SetAllSpaceBase<SetAllSpacePass> {
     // local alloc
     for (auto alloc : funcOp.getOps<memref::AllocOp>()) {
       auto ret = alloc.getResult();
-      if (auto MemrefTy = ret.getType().dyn_cast<MemRefType>()) {
+      if (auto MemrefTy = dyn_cast<MemRefType>(ret.getType())) {
         auto newRetType = cloneMemRefTypeWithMemSpace(MemrefTy, newSpace);
         ret.setType(newRetType);
       }
@@ -834,7 +894,7 @@ struct SetArgSpacePass : public SetArgSpaceBase<SetArgSpacePass> {
           // arguement
           for (unsigned i = 0, e = callOp.getNumOperands(); i < e; ++i) {
             auto operand = callOp.getOperand(i);
-            if (auto memrefType = operand.getType().dyn_cast<MemRefType>()) {
+            if (auto memrefType = dyn_cast<MemRefType>(operand.getType())) {
               auto curSpace = memrefType.getMemorySpace();
               // insert arg copy if operand was already set with different space
               // or operand is the result of some function call with
@@ -909,7 +969,7 @@ struct SetArgSpacePass : public SetArgSpaceBase<SetArgSpacePass> {
 
           // append space suffix to sym name
           auto newGlobalName = globalOp.getSymName().str();
-          if (auto useSpaceStrAttr = useSpace.dyn_cast_or_null<StringAttr>()) {
+          if (auto useSpaceStrAttr = dyn_cast_or_null<StringAttr>(useSpace)) {
             newGlobalName += "_" + useSpaceStrAttr.getValue().str();
           }
           newGlobalOp.setSymName(newGlobalName);

@@ -109,11 +109,6 @@ def _dispatch_cat_pooling2d(op, inputs):
     else:
         raise ValueError("Currently AIT backend only support max2d and avg2d pooling")
 
-@AITemplateIRTranslator.register("cat.relu")
-def _dispatch_cat_relu(op, inputs):
-    Y = ait_ops.relu(inputs[0])
-    return [Y]
-
 @AITemplateIRTranslator.register("cat.reduce")
 def _dispatch_cat_reduce(op, inputs):
     dim = mlir_attr_to_pyobj(op.attributes["dims"])
@@ -142,26 +137,32 @@ def _dispatch_cat_reduce(op, inputs):
         raise RuntimeError("Currently we do not support this kind of reduce")
 
 @AITemplateIRTranslator.register("cat.gemm_rrr")
-def _dispatch_cat_gemm(op, inputs):
+def _dispatch_cat_gemm_rrr(op, inputs):
     ait_op = ait_ops.gemm_rrr()
     Y = ait_op(inputs[0], inputs[1])
     return [Y]
 
 @AITemplateIRTranslator.register("cat.gemm_rcr")
-def _dispatch_cat_gemm(op, inputs):
+def _dispatch_cat_gemm_rcr(op, inputs):
     ait_op = ait_ops.gemm_rcr()
     Y = ait_op(inputs[0], inputs[1])
     return [Y]
 
 @AITemplateIRTranslator.register("cat.gemm_rrr_bias")
-def _dispatch_cat_gemm_bias(op, inputs):
+def _dispatch_cat_gemm_rrr_bias(op, inputs):
     ait_op = ait_ops.gemm_rrr_bias()
     Y = ait_op(inputs[0], inputs[1], inputs[2])
     return [Y]
 
 @AITemplateIRTranslator.register("cat.gemm_rcr_bias")
-def _dispatch_cat_gemm_bias(op, inputs):
+def _dispatch_cat_gemm_rcr_bias(op, inputs):
     ait_op = ait_ops.gemm_rcr_bias()
+    Y = ait_op(inputs[0], inputs[1], inputs[2])
+    return [Y]
+
+@AITemplateIRTranslator.register("cat.gemm_rcr_bias_relu")
+def _dispatch_cat_gemm_rcr_bias_relu(op, inputs):
+    ait_op = ait_ops.gemm_rcr_bias_relu()
     Y = ait_op(inputs[0], inputs[1], inputs[2])
     return [Y]
 
@@ -290,47 +291,6 @@ def _dispatch_cat_softmax(op, inputs):
     Y = ait_op(inputs[0], dim=dim)
     return [Y]
 
-def _cat_elem_op_type_to_ait(op_type: str) -> ait_func_enum:
-    op_map = {
-        "add": ait_func_enum.ADD,
-        "sub": ait_func_enum.SUB,
-        "mul": ait_func_enum.MUL,
-        "div": ait_func_enum.DIV,
-        "tanh": ait_func_enum.TANH,
-        "pow": ait_func_enum.POW,
-        "sqrt": ait_func_enum.SQRT,
-        "log": ait_func_enum.LOGE,
-        "max": ait_func_enum.MAX,
-    }
-    return op_map.get(op_type, None)
-
-@AITemplateIRTranslator.register("cat.unary_elementwise")
-def _dispatch_cat_unary_elementwise(op, inputs):
-    op_type = mlir_attr_to_pyobj(op.attributes["op_type"])
-    ait_op_type = _cat_elem_op_type_to_ait(op_type)
-    if ait_op_type is None:
-        raise ValueError(f"Invalid op type: {op_type}")
-    ait_op = ait_ops.elementwise(ait_op_type)
-    Y = ait_op(inputs[0])
-    return [Y]
-
-@AITemplateIRTranslator.register("cat.binary_elementwise")
-def _dispatch_cat_binary_elementwise(op, inputs):
-    op_type = mlir_attr_to_pyobj(op.attributes["op_type"])
-    ait_op_type = _cat_elem_op_type_to_ait(op_type)
-    if ait_op_type is None:
-        raise ValueError(f"Invalid op type: {op_type}")
-    ait_op = ait_ops.elementwise(ait_op_type)
-    Y = ait_op(inputs[0], inputs[1])
-    return [Y]
-
-@AITemplateIRTranslator.register("mhlo.reshape")
-def _dispatch_mhlo_reshape(op, inputs):
-    shaped_type = ir.ShapedType(op.result.type)
-    from aitemplate.compiler.ops.common.view_ops import reshape
-    Y = reshape()(inputs[0], shaped_type.shape)
-    return [Y]
-
 @AITemplateIRTranslator.register("cat.layernorm")
 def _dispatch_cat_layernorm(op, inputs):
     ait_op = ait_ops.layernorm()
@@ -349,34 +309,4 @@ def _dispatch_mhlo_transpose(op, inputs):
     dims = mlir_attr_to_pyobj(op.attributes["permutation"])
     dims = dims.tolist()
     Y = ait_ops.permute()(inputs[0], dims)
-    return [Y]
-
-@AITemplateIRTranslator.register("cat.slice")
-def _dispatch_cat_slice(op, inputs):
-    shaped_type = ir.ShapedType(op.result.type)
-    start_indices = mlir_attr_to_pyobj(op.attributes["start_indices"])
-    end_indices = mlir_attr_to_pyobj(op.attributes["end_indices"])
-
-    start_indices = start_indices.tolist()
-    end_indices = end_indices.tolist()
-    Y = ait_ops.dynamic_slice()(inputs[0], start_indices, end_indices)
-    return [Y]
-
-
-@AITemplateIRTranslator.register("cat.cast")
-def _dispatch_cat_cast(op, inputs):
-    shaped_type = ir.ShapedType(op.result.type)
-    dtype = mlir_type_to_torch_str(shaped_type.element_type)
-    Y = ait_ops.cast()(inputs[0], dtype)
-    return [Y]
-
-@AITemplateIRTranslator.register("cat.concatenate")
-def _dispatch_cat_concatenate(op, inputs):
-    dim = mlir_attr_to_pyobj(op.attributes["dimension"])
-    Y = ait_ops.concatenate()(inputs, dim=dim)
-    return [Y]
-
-@AITemplateIRTranslator.register("cat.where")
-def _dispatch_cat_where(op, inputs):
-    Y = ait_ops.where()(inputs[0], inputs[1], inputs[2])
     return [Y]

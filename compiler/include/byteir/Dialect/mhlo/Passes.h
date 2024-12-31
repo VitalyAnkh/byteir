@@ -24,6 +24,7 @@
 #include "byteir/Dialect/mhlo/Transforms/ConvertInsertion.h"
 #include "byteir/Dialect/mhlo/Transforms/ConvertOpToCustomCall.h"
 #include "byteir/Dialect/mhlo/Transforms/DTypeConversion.h"
+#include "byteir/Dialect/mhlo/Transforms/DecomposeMhloCustomCallOps.h"
 #include "byteir/Dialect/mhlo/Transforms/DynamicShapeClustering.h"
 #include "byteir/Dialect/mhlo/Transforms/FuncArgRearrangement.h"
 #include "byteir/Dialect/mhlo/Transforms/FuseBMMDimension.h"
@@ -31,7 +32,7 @@
 #include "byteir/Dialect/mhlo/Transforms/HloFolder.h"
 #include "byteir/Dialect/mhlo/Transforms/HloFuser.h"
 #include "byteir/Dialect/mhlo/Transforms/HloMove.h"
-#include "byteir/Dialect/mhlo/Transforms/HloTransposeDotToDotGeneral.h"
+#include "byteir/Dialect/mhlo/Transforms/HloSimplify.h"
 #include "byteir/Dialect/mhlo/Transforms/InsertShapeConstraint.h"
 #include "byteir/Dialect/mhlo/Transforms/LayoutTransformation.h"
 #include "byteir/Dialect/mhlo/Transforms/MatmulLayoutTransform.h"
@@ -55,6 +56,10 @@ inline void registerByteIRMhloPassesExt() {
   // register createElementFusionPass
   ::mlir::registerPass([]() -> std::unique_ptr<::mlir::Pass> {
     return mlir::createElementFusionPass();
+  });
+
+  ::mlir::registerPass([]() -> std::unique_ptr<::mlir::Pass> {
+    return mlir::createConcatSliceFusionPass();
   });
 
   // register createCatFusionPass

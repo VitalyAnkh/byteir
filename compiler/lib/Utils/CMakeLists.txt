@@ -9,6 +9,8 @@ add_mlir_library(ByteIRUtils
   MemUtils.cpp
   ModuleUtils.cpp
   OpInterfaceUtils.cpp
+  PatternMatch.cpp
+  OptionUtils.cpp
   PipelineUtils.cpp
   TileUtils.cpp
   TypeUtils.cpp

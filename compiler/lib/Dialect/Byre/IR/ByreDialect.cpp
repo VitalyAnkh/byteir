@@ -21,6 +21,7 @@
 
 #include "byteir/Dialect/Byre/ByreDialect.h"
 
+#include "byteir/Utils/TypeUtils.h"
 #include "byteir/Utils/Utils.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -31,10 +32,10 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/DialectImplementation.h"
-#include "mlir/IR/FunctionImplementation.h"
 #include "mlir/IR/OpImplementation.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/TypeUtilities.h"
+#include "mlir/Interfaces/FunctionImplementation.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include <algorithm> // for std::any_of
@@ -124,7 +125,7 @@ void ByreDialect::printType(Type type, DialectAsmPrinter &os) const {
 LogicalResult ByreDialect::verifyOperationAttribute(Operation *op,
                                                     NamedAttribute attr) {
   // ContainerModuleAttr only applied to ModuleOp
-  if (attr.getValue().isa<UnitAttr>() &&
+  if (isa<UnitAttr>(attr.getValue()) &&
       attr.getName().getValue() == getContainerModuleAttrName()) {
     if (!isa<ModuleOp>(op)) {
       return op->emitError("expected '")
@@ -159,7 +160,7 @@ LogicalResult ByreDialect::verifyOperationAttribute(Operation *op,
   }
 
   // ModuleMemorySpaceAttr only applied to ModuleOp with ContainerModuleAttr
-  if (attr.getValue().isa<ArrayAttr>() &&
+  if (isa<ArrayAttr>(attr.getValue()) &&
       attr.getName().getValue() == getModuleMemorySpaceAttrName()) {
     if (!op->hasAttrOfType<UnitAttr>(getContainerModuleAttrName())) {
       return op->emitError("expected '")
@@ -172,7 +173,7 @@ LogicalResult ByreDialect::verifyOperationAttribute(Operation *op,
 
   // EntryPointFunctionAttr only applied to FuncOp,
   // which under ModuleOp with ContainerModuleAttrName
-  if (attr.getValue().isa<UnitAttr>() &&
+  if (isa<UnitAttr>(attr.getValue()) &&
       attr.getName().getValue() == getEntryPointFunctionAttrName()) {
     if (!isa<func::FuncOp>(op)) {
       return op->emitError("expected '")
@@ -238,7 +239,7 @@ LogicalResult ByreDialect::verifyOperationAttribute(Operation *op,
       // check argument name
       if (auto argNameAttr = funcOp.getArgAttr(
               idx, ByreDialect::getEntryPointFuncArgNameAttrName())) {
-        if (!argNameAttr.isa<StringAttr>()) {
+        if (!isa<StringAttr>(argNameAttr)) {
           return op->emitError("expected StringAttr in '")
                  << ByreDialect::getEntryPointFuncArgNameAttrName() << '\'';
         }
@@ -289,7 +290,7 @@ LogicalResult ComputeOp::verify() {
       return emitError("size of memory effects mismatch");
     }
     if (llvm::any_of(maybeMemoryEffects->getValue(), [](Attribute attr) {
-          return !attr.isa<MemoryEffectAttr>();
+          return !isa<MemoryEffectAttr>(attr);
         })) {
       return emitError("invalid memory effect attribute");
     }
@@ -370,6 +371,12 @@ LogicalResult CopyOp::fold(FoldAdaptor, SmallVectorImpl<OpFoldResult> &) {
 }
 
 LogicalResult CopyOp::verify() {
+  auto srcType = cast<MemRefType>(getSource().getType());
+  auto dstType = cast<MemRefType>(getTarget().getType());
+  if (!srcType.getLayout().isIdentity() || !dstType.getLayout().isIdentity()) {
+    return this->emitError(
+        "expected src and dst must be identity layout memref");
+  }
   return verifyOpInEntryPointFunc(this->getOperation());
 }
 
@@ -448,22 +455,19 @@ struct CollapseAliasChain : public OpRewritePattern<AliasOp> {
   LogicalResult matchAndRewrite(AliasOp aliasOp,
                                 PatternRewriter &rewriter) const override {
     if (auto sourceOp = aliasOp.getSource().getDefiningOp<AliasOp>()) {
-      rewriter.replaceOpWithNewOp<AliasOp>(
-          aliasOp, aliasOp.getTarget().getType(), sourceOp.getSource(),
-          aliasOp.getOffset() + sourceOp.getOffset());
-      return success();
-    }
-    return failure();
-  }
-};
-struct RemoveIdentityAliasOp : public OpRewritePattern<AliasOp> {
-  using OpRewritePattern<AliasOp>::OpRewritePattern;
+      auto srcElemBitwidth = canonicalizeTypeBitWidth(
+          cast<MemRefType>(sourceOp.getSource().getType()).getElementType());
+      auto curElemBitwidth = canonicalizeTypeBitWidth(
+          cast<MemRefType>(aliasOp.getSource().getType()).getElementType());
 
-  LogicalResult matchAndRewrite(AliasOp aliasOp,
-                                PatternRewriter &rewriter) const override {
-    if (aliasOp.getSource().getType() == aliasOp.getTarget().getType() &&
-        aliasOp.getOffset() == 0) {
-      rewriter.replaceOp(aliasOp, aliasOp.getSource());
+      if (aliasOp.getOffset() * curElemBitwidth % srcElemBitwidth != 0) {
+        return failure();
+      }
+      auto newOffset = aliasOp.getOffset() * curElemBitwidth / srcElemBitwidth +
+                       sourceOp.getOffset();
+      rewriter.replaceOpWithNewOp<AliasOp>(aliasOp,
+                                           aliasOp.getTarget().getType(),
+                                           sourceOp.getSource(), newOffset);
       return success();
     }
     return failure();
@@ -473,17 +477,69 @@ struct RemoveIdentityAliasOp : public OpRewritePattern<AliasOp> {
 
 // verify AliasOp
 LogicalResult AliasOp::verify() {
-  return verifyOpInEntryPointFunc(this->getOperation());
+  auto *op = this->getOperation();
+
+  auto srcType = cast<MemRefType>(getSource().getType());
+  auto dstType = cast<MemRefType>(getTarget().getType());
+
+  // check static shape
+  if (!srcType.hasStaticShape() || !dstType.hasStaticShape()) {
+    return op->emitError("expected srouce and target both have static shape");
+  }
+
+  // check if src and dst has memory space.
+  auto srcMemSpace = srcType.getMemorySpace();
+  auto dstMemSpace = dstType.getMemorySpace();
+  // TODO. W'd better set memory space explicitly but not use default mem space.
+  if ((srcMemSpace || dstMemSpace) &&
+      (!srcMemSpace || !dstMemSpace || srcMemSpace != dstMemSpace)) {
+    return op->emitError(
+        "expected explicit same memory space with source and target");
+  }
+  return verifyOpInEntryPointFunc(op);
+}
+
+OpFoldResult AliasOp::fold(FoldAdaptor adaptor) {
+  if (this->getSource().getType() == this->getTarget().getType() &&
+      this->getOffset() == 0) {
+    return this->getSource();
+  }
+  return nullptr;
 }
 
 void AliasOp::getCanonicalizationPatterns(RewritePatternSet &results,
                                           MLIRContext *context) {
-  results.add<CollapseAliasChain, RemoveIdentityAliasOp>(context);
+  results.add<CollapseAliasChain>(context);
 }
 
 std::string AliasOp::getCalleeName() { return "AliasOp"; }
 
 Value AliasOp::getViewSource() { return getSource(); }
+
+//===----------------------------------------------------------------------===//
+// CustomOp
+//===----------------------------------------------------------------------===/
+
+void CustomOp::build(OpBuilder &builder, OperationState &result,
+                     StringRef lib_path, StringRef api_name, StringRef version,
+                     ValueRange inputs, ValueRange outputs,
+                     ArrayAttr extra_args) {
+  SmallVector<Attribute> memoryEffectAttrs;
+  memoryEffectAttrs.append(
+      inputs.size(), builder.getAttr<MemoryEffectAttr>(MemoryEffect::Read));
+  memoryEffectAttrs.append(
+      outputs.size(), builder.getAttr<MemoryEffectAttr>(MemoryEffect::Write));
+  build(builder, result, TypeRange{}, lib_path, api_name, version,
+        llvm::to_vector(llvm::concat<Value>(llvm::to_vector(inputs),
+                                            llvm::to_vector(outputs))),
+        extra_args, builder.getArrayAttr(memoryEffectAttrs));
+}
+
+std::string CustomOp::getCalleeName() { return "custom"; }
+
+LogicalResult CustomOp::verify() {
+  return verifyOpInEntryPointFunc(this->getOperation());
+}
 
 // LWC: ignore Async for now
 //
@@ -493,10 +549,10 @@ Value AliasOp::getViewSource() { return getSource(); }
 
 void byre::addAsyncDependency(Operation *op, Value token) {
   op->insertOperands(0, {token});
-  if (!op->template hasTrait<OpTrait::AttrSizedOperandSegments>())
+  if (!op->template hasTrait<mlir::OpTrait::AttrSizedOperandSegments>())
     return;
-  auto attrName =
-      OpTrait::AttrSizedOperandSegments<void>::getOperandSegmentSizeAttr();
+  auto attrName = mlir::OpTrait::AttrSizedOperandSegments<
+      void>::getOperandSegmentSizeAttr();
   auto sizeAttr = op->template getAttrOfType<DenseI32ArrayAttr>(attrName);
   if (!sizeAttr)
     return; // Async dependencies is the only variadic operand.

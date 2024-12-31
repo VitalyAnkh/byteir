@@ -17,10 +17,12 @@
 
 #include "brt/backends/cpu/providers/default/cpu_provider.h"
 
+#include "./copy/copy.h"
+#include "./custom_call/non_zero.h"
+#include "./custom_call/repeat.h"
 #include "./custom_call/tf_equal.h"
 #include "./custom_call/tf_select.h"
 #include "./custom_call/tf_string_to_number.h"
-#include "./custom_call/tf_where.h"
 #include "./custom_call/topk.h"
 #include "./llvm/jit.h"
 #include "./math/elementwise_ops.h"
@@ -44,7 +46,9 @@ namespace brt {
 
 namespace {
 
-// statcially register all CPU OpKernels
+// legacy register for deprecated kernels
+// note: we do not guarantee the backward compatibility of these OpKernels,
+// we will remove them if brt upgrade to 2.0
 BRT_STATIC_KERNEL_REGISTRATION(
     DeviceKind::CPU, ProviderType::BRT, [](KernelRegistry *registry) {
       registry->Register(
@@ -74,25 +78,21 @@ BRT_STATIC_KERNEL_REGISTRATION(
                 new cpu::Typecvt<DTypeEnum::Float16, DTypeEnum::Float32>(info));
             return kernel;
           });
+    });
+
+// statcially register all CPU OpKernels
+// register for stable kernels
+BRT_STATIC_KERNEL_REGISTRATION(
+    DeviceKind::CPU, ProviderType::BRT, [](KernelRegistry *registry) {
       registry->Register(
           "LLVMJITOp",
           [](const brt::OpKernelInfo &info) -> std::shared_ptr<OpKernel> {
             return std::make_shared<cpu::LLVMJITOpKernel>(info);
           });
       registry->Register(
-          "ComputeShapeOp",
-          [](const brt::OpKernelInfo &info) -> std::shared_ptr<OpKernel> {
-            return std::make_shared<cpu::ShapeCompute>(info);
-          });
-      registry->Register(
           "FillOp",
           [](const brt::OpKernelInfo &info) -> std::shared_ptr<brt::OpKernel> {
             return std::make_shared<cpu::Fill>(info);
-          });
-      registry->Register(
-          "tf.Where",
-          [](const brt::OpKernelInfo &info) -> std::shared_ptr<OpKernel> {
-            return std::make_shared<cpu::TFWhere>(info);
           });
       registry->Register(
           "tf.Equal",
@@ -124,7 +124,33 @@ BRT_STATIC_KERNEL_REGISTRATION(
           [](const brt::OpKernelInfo &info) -> std::shared_ptr<OpKernel> {
             return std::make_shared<cpu::NextOffsetOpKernel>(info);
           });
+      registry->Register(
+          "byteir.non_zero",
+          [](const brt::OpKernelInfo &info) -> std::shared_ptr<OpKernel> {
+            return std::make_shared<cpu::NonZero>(info);
+          });
+
+      registry->Register(
+          "cpu2cpu",
+          [](const brt::OpKernelInfo &info) -> std::shared_ptr<OpKernel> {
+            return std::make_shared<cpu::CopyOpKernel>(info);
+          });
       RegisterCommonBuiltinOps(registry);
+    });
+
+// register for experimental kernels
+BRT_STATIC_KERNEL_REGISTRATION(
+    DeviceKind::CPU, ProviderType::BRT, [](KernelRegistry *registry) {
+      registry->Register(
+          "ComputeShapeOp",
+          [](const brt::OpKernelInfo &info) -> std::shared_ptr<OpKernel> {
+            return std::make_shared<cpu::ShapeCompute>(info);
+          });
+      // registry->Register(
+      //     "byteir.repeat",
+      //     [](const brt::OpKernelInfo &info) -> std::shared_ptr<OpKernel> {
+      //       return std::make_shared<cpu::Repeat>(info);
+      //     });
     });
 
 } // namespace

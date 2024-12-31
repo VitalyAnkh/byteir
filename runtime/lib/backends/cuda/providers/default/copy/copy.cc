@@ -43,7 +43,7 @@ CopyOpKernel::CopyOpKernel(const OpKernelInfo &info, int task_type)
   dst_id = GetTensorIndexFromOpArgIndex(info_, 1);
 
   // get static bytes
-  // TODO change to dynamic later
+  // TODO: change to dynamic later
   auto src_val = GetMLIRValueFromOpArgIndex(info_, 0);
   auto maybe_bytes = GetStaticBytes(src_val);
   if (maybe_bytes.has_value()) {
@@ -64,8 +64,8 @@ common::Status CopyOpKernel::RunImpl(const ExecutionContext &ctx) {
   args[1] = &src_value;
   args[2] = &byte_size;
   auto work_queue = static_cast<CUDAWorkQueue *>(ctx.work_queue);
-  work_queue->AddEventWait(info_.GetOperation(), info_.GetDependency());
-  return work_queue->AddTask(task_type, nullptr, args.data());
+  return work_queue->AddTask(task_type, nullptr, args.data(), info_.GetOpId(),
+                             info_.GetDependency());
 }
 
 } // namespace cuda

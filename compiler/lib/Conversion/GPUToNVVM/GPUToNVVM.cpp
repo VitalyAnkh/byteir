@@ -91,8 +91,8 @@ public:
 
     mlir::Type resultType = castedOperands.front().getType();
     mlir::Type funcType = getFunctionType(resultType, castedOperands);
-    StringRef funcName = getFunctionName(
-        funcType.cast<LLVM::LLVMFunctionType>().getReturnType());
+    StringRef funcName =
+        getFunctionName(cast<LLVM::LLVMFunctionType>(funcType).getReturnType());
     if (funcName.empty())
       return failure();
 
@@ -115,7 +115,7 @@ public:
 private:
   mlir::Value maybeCast(mlir::Value operand, PatternRewriter &rewriter) const {
     mlir::Type type = operand.getType();
-    if (!type.isa<Float16Type>())
+    if (!isa<Float16Type>(type))
       return operand;
 
     return rewriter.create<LLVM::FPExtOp>(
@@ -128,9 +128,9 @@ private:
   }
 
   StringRef getFunctionName(mlir::Type type) const {
-    if (type.isa<Float32Type>())
+    if (isa<Float32Type>(type))
       return f32Func;
-    if (type.isa<Float64Type>())
+    if (isa<Float64Type>(type))
       return f64Func;
     return "";
   }
@@ -179,10 +179,19 @@ public:
 void populateOptionalGpuToNVVMExtConversionPatterns(
     LLVMTypeConverter &converter, RewritePatternSet &patterns) {
 
-  patterns.add<OpToFuncCallLowering<arith::MaxFOp>>(converter, "__nv_fmaxf",
-                                                    "__nv_fmax");
-  patterns.add<OpToFuncCallLowering<arith::MinFOp>>(converter, "__nv_fminf",
-                                                    "__nv_fmin");
+  patterns.add<OpToFuncCallLowering<arith::MaxNumFOp>>(converter, "__nv_fmaxf",
+                                                       "__nv_fmax");
+  patterns.add<OpToFuncCallLowering<arith::MinNumFOp>>(converter, "__nv_fminf",
+                                                       "__nv_fmin");
+}
+
+void populateTempGpuToNVVMExtConversionPatterns(LLVMTypeConverter &converter,
+                                                RewritePatternSet &patterns) {
+
+  patterns.add<OpToFuncCallLowering<arith::MaximumFOp>>(converter, "__nv_fmaxf",
+                                                        "__nv_fmax");
+  patterns.add<OpToFuncCallLowering<arith::MinimumFOp>>(converter, "__nv_fminf",
+                                                        "__nv_fmin");
 }
 
 static IntegerAttr wrapNumericMemorySpace(MLIRContext *ctx, unsigned space) {
@@ -203,13 +212,24 @@ void populateGpuMemorySpaceAttributeConversions(
       });
 }
 
+bool compare_nvgpu_arch_lt(const std::string &lhs, const std::string &rhs) {
+  if (lhs.size() < 4 || rhs.size() < 4)
+    return false;
+
+  auto larch = std::stoi(lhs.substr(3));
+  auto rarch = std::stoi(rhs.substr(3));
+  return larch < rarch;
+}
+
 // Note: this pass is an externsion pass of upstream pass:
 // https://github.com/llvm/llvm-project/blob/main/mlir/lib/Conversion/GPUToNVVM/LowerGpuOpsToNVVMOps.cpp
 struct GPUToNVVMExtPass : public GPUToNVVMExtBase<GPUToNVVMExtPass> {
   GPUToNVVMExtPass() = default;
-  GPUToNVVMExtPass(bool useBarePtrCallConv, unsigned indexBitwidth) {
+  GPUToNVVMExtPass(bool useBarePtrCallConv, unsigned indexBitwidth,
+                   const std::string &gpuArch) {
     this->useBarePtrCallConv = useBarePtrCallConv;
     this->indexBitwidth = indexBitwidth;
+    this->gpuArch = gpuArch;
   }
 
   void runOnOperation() override {
@@ -284,6 +304,12 @@ struct GPUToNVVMExtPass : public GPUToNVVMExtBase<GPUToNVVMExtPass> {
     // our extension fixing
     // populateOptionalGpuToNVVMExtConversionPatterns(converter, llvmPatterns);
 
+    // TODO: remove this rewrite pattern while upgrading llvm higher than
+    // `ee54c86ef`
+    if (compare_nvgpu_arch_lt(this->gpuArch, "sm_80")) {
+      populateTempGpuToNVVMExtConversionPatterns(converter, llvmPatterns);
+    }
+
     LLVMConversionTarget target(getContext());
     configureGpuToNVVMConversionLegality(target);
     FrozenRewritePatternSet frozenLLVMPatterns(std::move(llvmPatterns));
@@ -305,6 +331,8 @@ struct GPUToNVVMExtPass : public GPUToNVVMExtBase<GPUToNVVMExtPass> {
 } // anonymous namespace
 
 std::unique_ptr<OperationPass<gpu::GPUModuleOp>>
-mlir::createGPUToNVVMExtPass(bool useBarePtrCallConv, unsigned indexBitwidth) {
-  return std::make_unique<GPUToNVVMExtPass>(useBarePtrCallConv, indexBitwidth);
+mlir::createGPUToNVVMExtPass(bool useBarePtrCallConv, unsigned indexBitwidth,
+                             const std::string &gpuArch) {
+  return std::make_unique<GPUToNVVMExtPass>(useBarePtrCallConv, indexBitwidth,
+                                            gpuArch);
 }

@@ -49,13 +49,13 @@
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/Diagnostics.h"
-#include "mlir/IR/FunctionImplementation.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/OpImplementation.h"
 #include "mlir/IR/OperationSupport.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/TypeUtilities.h"
 #include "mlir/IR/Value.h"
+#include "mlir/Interfaces/FunctionImplementation.h"
 #include "mlir/Interfaces/TilingInterface.h"
 #include "mlir/Support/LLVM.h"
 #include "mlir/Support/LogicalResult.h"
@@ -129,7 +129,7 @@ static FailureOr<TilingResult> commonGenerateResultTileValueForLinalgExtOp(
   }
   for (const auto &resultExpr : llvm::enumerate(indexingMap.getResults())) {
     unsigned dimPosition =
-        resultExpr.value().cast<AffineDimExpr>().getPosition();
+        cast<AffineDimExpr>(resultExpr.value()).getPosition();
     iterationTileOffsets[dimPosition] = offsets[resultExpr.index()];
     iterationTileSizes[dimPosition] = sizes[resultExpr.index()];
   }
@@ -162,14 +162,14 @@ SmallVector<Range> commonGetIterationDomainForLinalgExt(Operation *op,
   return loopBounds;
 }
 
-FailureOr<Operation *> commonGenerateInitialTensorForPartialReduction(
+FailureOr<SmallVector<Value>> commonGenerateInitialTensorForPartialReduction(
     Operation *op, OpBuilder &b, Location loc, ArrayRef<OpFoldResult> sizes,
     ArrayRef<int> reductionDims) {
   auto linalgOp = cast<LinalgOp>(op);
   OpBuilder::InsertionGuard guard(b);
   assert(reductionDims.size() == 1 &&
          "only support single reduction right now.");
-  if (linalgOp.hasBufferSemantics())
+  if (linalgOp.hasPureBufferSemantics())
     return op->emitOpError("expected operation to have tensor semantics");
   // Insert the new parallel dimension based on the index of the reduction
   // loop. This could be controlled by user for more flexibility.
@@ -208,7 +208,11 @@ FailureOr<Operation *> commonGenerateInitialTensorForPartialReduction(
       dynamicDims);
   Value constantOp = b.create<arith::ConstantOp>(loc, *identity);
   auto identityTensor = b.create<linalg::FillOp>(loc, constantOp, emptyTensor);
-  return identityTensor.getOperation();
+  SmallVector<Value> results;
+  for (auto item : identityTensor.getResults()) {
+    results.emplace_back(item);
+  }
+  return results;
 }
 
 Operation *commonTileToPartialReduction(Operation *op, OpBuilder &b,
@@ -235,7 +239,7 @@ Operation *commonTileToPartialReduction(Operation *op, OpBuilder &b,
     outputExpr.push_back(b.getAffineDimExpr(reductionDims[0]));
 
   // Step 1: Extract a slice of the input operands.
-  SmallVector<Value> valuesToTile = linalgOp.getDpsInputOperands();
+  SmallVector<Value> valuesToTile = linalgOp.getDpsInputs();
   SmallVector<Value, 4> tiledOperands =
       makeTiledShapes(b, loc, linalgOp, valuesToTile, offsets, sizes, {}, true);
 
@@ -273,7 +277,7 @@ Operation *commonMergeReductions(Operation *op, OpBuilder &b, Location loc,
 
   // Then create a new reduction that only reduce the newly added dimension
   // from the previous op.
-  int64_t intermRank = partialReduce[0].getType().cast<ShapedType>().getRank();
+  int64_t intermRank = cast<ShapedType>(partialReduce[0].getType()).getRank();
   AffineMap inputMap = b.getMultiDimIdentityMap(intermRank);
   SmallVector<utils::IteratorType> reductionIteratorTypes;
   SmallVector<AffineExpr> exprs;
@@ -294,8 +298,7 @@ Operation *commonMergeReductions(Operation *op, OpBuilder &b, Location loc,
 
   auto reduction = b.create<GenericOp>(
       loc, op->getResultTypes(), ValueRange({partialReduce[0]}),
-      SmallVector<Value>{linalgOp.getDpsInitOperands()}, reductionMaps,
-      reductionIteratorTypes,
+      linalgOp.getDpsInits(), reductionMaps, reductionIteratorTypes,
       [reductionOp](OpBuilder &b, Location loc, ValueRange inputs) {
         Operation *clonedReductionOp = b.clone(*reductionOp);
         clonedReductionOp->setOperand(0, inputs[0]);
@@ -328,13 +331,13 @@ bool mlir::linalg_ext::involveReduction(
 
     auto indexingMap = indexingMaps[en.index()];
     for (const auto &en2 : llvm::enumerate(mixedOffsets)) {
-      auto value = en2.value().dyn_cast<Value>();
+      auto value = dyn_cast<Value>(en2.value());
       if (!value) {
         // since not a value, it implies not a loop arg
         continue;
       }
 
-      auto iterArg = value.dyn_cast<BlockArgument>();
+      auto iterArg = dyn_cast<BlockArgument>(value);
       if (!iterArg || !isa<scf::ForOp>(iterArg.getOwner()->getParentOp())) {
         // since not a BlockArgument or owner is a loop,
         // it implies not a loop arg
@@ -468,12 +471,12 @@ mlir::LogicalResult mlir::linalg_ext::ScanOp::verify() {
   if (getNumOutputs() != 2) {
     return op->emitOpError("expected two output operands");
   }
-  if (!input().getType().isa<ShapedType>()) {
+  if (!isa<ShapedType>(input().getType())) {
     return op->emitOpError("expected first input element type to be shaped");
   }
-  auto accumulatorType = accumulator().getType().cast<ShapedType>();
-  auto inputType = input().getType().cast<ShapedType>();
-  auto outputType = output().getType().cast<ShapedType>();
+  auto accumulatorType = cast<ShapedType>(accumulator().getType());
+  auto inputType = cast<ShapedType>(input().getType());
+  auto outputType = cast<ShapedType>(output().getType());
   ArrayRef<int64_t> inputShapes = inputType.getShape();
   ArrayRef<int64_t> outputShapes = outputType.getShape();
   if (accumulatorType.getElementType() != inputType.getElementType()) {
@@ -586,7 +589,7 @@ mlir::linalg_ext::ScanOp::getTiledImplementation(OpBuilder &builder,
   }
 
   SmallVector<Type, 4> resultTypes;
-  if (hasTensorSemantics()) {
+  if (hasPureTensorSemantics()) {
     resultTypes.push_back(tiledOperands[1].getType());
     resultTypes.push_back(tiledOperands[2].getType());
   }
@@ -669,7 +672,7 @@ mlir::LogicalResult mlir::linalg_ext::ScatterOp::verify() {
     return op->emitOpError("expected one output operands src");
   }
   if (!llvm::all_of(op->getOperandTypes(), [](Type t) {
-        return t.isa<ShapedType>() && t.cast<ShapedType>().hasRank();
+        return isa<ShapedType>(t) && cast<ShapedType>(t).hasRank();
       })) {
     return op->emitOpError("expected ranked ShapedType for all operands");
   }
@@ -861,7 +864,7 @@ FailureOr<TilingResult> mlir::linalg_ext::ScatterOp::getTiledImplementation(
   // tiled scatter op
   Operation *newOp = mlir::clone(
       builder, getOperation(),
-      hasTensorSemantics() ? TypeRange(newSrc.getType()) : TypeRange(),
+      hasPureTensorSemantics() ? TypeRange(newSrc.getType()) : TypeRange(),
       {newIndices, newUpdate, newSrc});
   return TilingResult{{newOp}, SmallVector<Value>(newOp->getResults())};
   ;
@@ -986,12 +989,12 @@ FailureOr<Value> getSoftmaxLikeScaleDiagMatmul(OpBuilder &b, mlir::Location loc,
     return failure();
 
   auto scale = op->getResult(3);
-  if (auto scaleTensorTy = scale.getType().dyn_cast<TensorType>()) {
-    if (!consumerOutput.getType().isa<TensorType>()) {
+  if (auto scaleTensorTy = dyn_cast<TensorType>(scale.getType())) {
+    if (!isa<TensorType>(consumerOutput.getType())) {
       // Not support mixing TensorType with other types
       return failure();
     }
-    auto consumerTensorTy = consumerOutput.getType().cast<TensorType>();
+    auto consumerTensorTy = cast<TensorType>(consumerOutput.getType());
     auto scaleEmpty = b.create<tensor::EmptyOp>(
         loc, DiagOp::getDiagType(scaleTensorTy), ValueRange{});
     auto diag =
@@ -1006,7 +1009,7 @@ FailureOr<Value> getSoftmaxLikeScaleDiagMatmul(OpBuilder &b, mlir::Location loc,
     SmallVector<Value> scaleMatmulInputs;
     scaleMatmulInputs.push_back(diag->getResult(0));
     scaleMatmulInputs.push_back(consumerOutput);
-    int64_t rank = consumerOutput.getType().cast<ShapedType>().getRank();
+    int64_t rank = cast<ShapedType>(consumerOutput.getType()).getRank();
     if (rank == 2) {
       auto scaleMatmul = b.create<linalg::MatmulOp>(loc, scaleMatmulInputs,
                                                     filledTensor->getResults());
@@ -1132,17 +1135,16 @@ mlir::LogicalResult verifySoftmaxLikeOp(SoftmaxLikeOp softmaxLikeOp) {
   if (softmaxLikeOp.getNumOutputs() != 4) {
     return op->emitOpError("expected 4 output operands");
   }
-  if (!softmaxLikeOp.input().getType().template isa<ShapedType>()) {
+  if (!isa<ShapedType>(softmaxLikeOp.input().getType())) {
     return op->emitOpError("expected first input element type to be shaped");
   }
 
-  auto maxType = softmaxLikeOp.max().getType().template cast<ShapedType>();
+  auto maxType = cast<ShapedType>(softmaxLikeOp.max().getType());
   auto accumulatorType =
-      softmaxLikeOp.accumulator().getType().template cast<ShapedType>();
-  auto scaleType = softmaxLikeOp.scale().getType().template cast<ShapedType>();
-  auto inputType = softmaxLikeOp.input().getType().template cast<ShapedType>();
-  auto outputType =
-      softmaxLikeOp.output().getType().template cast<ShapedType>();
+      cast<ShapedType>(softmaxLikeOp.accumulator().getType());
+  auto scaleType = cast<ShapedType>(softmaxLikeOp.scale().getType());
+  auto inputType = cast<ShapedType>(softmaxLikeOp.input().getType());
+  auto outputType = cast<ShapedType>(softmaxLikeOp.output().getType());
   ArrayRef<int64_t> inputShapes = inputType.getShape();
   ArrayRef<int64_t> outputShapes = outputType.getShape();
 
@@ -1401,7 +1403,7 @@ FailureOr<TilingResult> getTiledImplementationForSoftmaxLikeOp(
   }
 
   SmallVector<Type, 4> resultTypes;
-  if (softmaxLikeOp.hasTensorSemantics()) {
+  if (softmaxLikeOp.hasPureTensorSemantics()) {
     resultTypes.push_back(tiledOperands[1].getType());
     resultTypes.push_back(tiledOperands[2].getType());
     resultTypes.push_back(tiledOperands[3].getType());
@@ -1598,7 +1600,7 @@ mlir::linalg_ext::TopkOp::getTiledImplementation(OpBuilder &builder,
   tiledOperands.emplace_back(
       getSlice(builder, loc, getOutputs()[1], offsets, outputSizes, strides));
   SmallVector<Type, 2> resultTypes;
-  if (hasTensorSemantics()) {
+  if (hasPureTensorSemantics()) {
     resultTypes.push_back(tiledOperands[tiledOperands.size() - 2].getType());
     resultTypes.push_back(tiledOperands[tiledOperands.size() - 1].getType());
   }
@@ -1732,10 +1734,9 @@ mlir::LogicalResult mlir::linalg_ext::BatchMatmulOp::verify() {
     return emitOpError("expected 2 input operands");
   if (getNumDpsInits() != 1)
     return emitOpError("expected 1 output operands");
-  ArrayRef<int64_t> lhsShape = getLhs().getType().cast<ShapedType>().getShape();
-  ArrayRef<int64_t> rhsShape = getRhs().getType().cast<ShapedType>().getShape();
-  ArrayRef<int64_t> outShape =
-      getInit().getType().cast<ShapedType>().getShape();
+  ArrayRef<int64_t> lhsShape = cast<ShapedType>(getLhs().getType()).getShape();
+  ArrayRef<int64_t> rhsShape = cast<ShapedType>(getRhs().getType()).getShape();
+  ArrayRef<int64_t> outShape = cast<ShapedType>(getInit().getType()).getShape();
   int64_t bsRank = lhsShape.size() - 2;
 
   for (int64_t i = 0; i < bsRank; ++i) {
@@ -1783,7 +1784,7 @@ void mlir::linalg_ext::BatchMatmulOp::build(
 
   // Add output types for `RankedTensorType` output arguments.
   Type initType = init.getType();
-  if (initType.isa<RankedTensorType>())
+  if (isa<RankedTensorType>(initType))
     result.addTypes(initType);
 
   // Create and fill the region of the structured operation.
@@ -1827,9 +1828,7 @@ ParseResult mlir::linalg_ext::BatchMatmulOp::parse(OpAsmParser &parser,
 }
 
 void mlir::linalg_ext::BatchMatmulOp::print(OpAsmPrinter &p) {
-  printCommonStructuredOpPartsWithNewLine(
-      p, SmallVector<Value>(getDpsInputOperands()),
-      SmallVector<Value>(getDpsInitOperands()));
+  printCommonStructuredOpPartsWithNewLine(p, getDpsInputs(), getDpsInits());
   p << ' ' << getLayoutAttrName().strref() << " = \"" << getLayout() << "\" ";
   p.printOptionalAttrDict((*this)->getAttrs(), {getLayoutAttrName()});
 }
@@ -1923,11 +1922,11 @@ mlir::linalg_ext::BatchMatmulOp::generateResultTileValue(
 void mlir::linalg_ext::BatchMatmulOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
-  getGenericEffectsImpl(effects, getOperation()->getResults(),
-                        getDpsInputOperands(), getDpsInitOperands());
+  getGenericEffectsImpl(effects, getOperation()->getResults(), getDpsInputs(),
+                        getDpsInits());
 }
 
-FailureOr<Operation *>
+FailureOr<SmallVector<Value>>
 mlir::linalg_ext::BatchMatmulOp::generateInitialTensorForPartialReduction(
     OpBuilder &b, Location loc, ArrayRef<OpFoldResult> sizes,
     ArrayRef<int> reductionDims) {
@@ -1962,12 +1961,12 @@ mlir::LogicalResult mlir::linalg_ext::LayerNormOp::verify() {
   if (getNumOutputs() != 1 && getNumOutputs() != 3) {
     return op->emitOpError("expected one or three output operands");
   }
-  if (!input().getType().isa<ShapedType>()) {
+  if (!isa<ShapedType>(input().getType())) {
     return op->emitOpError("expected first input element type to be shaped");
   }
 
-  auto inputType = input().getType().cast<ShapedType>();
-  auto outputType = output().getType().cast<ShapedType>();
+  auto inputType = cast<ShapedType>(input().getType());
+  auto outputType = cast<ShapedType>(output().getType());
   ArrayRef<int64_t> inputShape = inputType.getShape();
   ArrayRef<int64_t> outputShape = outputType.getShape();
   if (outputType.getElementType() != inputType.getElementType()) {
@@ -1977,8 +1976,8 @@ mlir::LogicalResult mlir::linalg_ext::LayerNormOp::verify() {
 
   if (getNumInputs() == 3) {
     // has weight and bias
-    auto weightType = weight().getType().cast<ShapedType>();
-    auto biasType = bias().getType().cast<ShapedType>();
+    auto weightType = cast<ShapedType>(weight().getType());
+    auto biasType = cast<ShapedType>(bias().getType());
     ArrayRef<int64_t> weightShape = weightType.getShape();
     ArrayRef<int64_t> biasShape = biasType.getShape();
 
@@ -2123,7 +2122,7 @@ FailureOr<TilingResult> mlir::linalg_ext::LayerNormOp::getTiledImplementation(
         getSlice(builder, loc, getOutputs()[2], offsets, outputSizes, strides));
   }
   SmallVector<Type> resultTypes;
-  if (hasTensorSemantics()) {
+  if (hasPureTensorSemantics()) {
     if (getNumOutputs() > 1) {
       resultTypes.push_back(tiledOperands[tiledOperands.size() - 3].getType());
       resultTypes.push_back(tiledOperands[tiledOperands.size() - 2].getType());
@@ -2181,8 +2180,8 @@ static void getEffectsImpl(
     LinalgExtOp linalgExtOp,
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects,
-    ValueRange results, OpOperandVector inputBuffers,
-    OpOperandVector outputBuffers) {
+    ValueRange results, SmallVector<OpOperand *> inputBuffers,
+    SmallVector<OpOperand *> outputBuffers) {
   for (Value value : results) {
     effects.emplace_back(MemoryEffects::Allocate::get(), value,
                          SideEffects::DefaultResource::get());
@@ -2257,7 +2256,7 @@ struct FoldTensorCastOp : public OpInterfaceRewritePattern<LinalgExtOp> {
     // If no operand comes from a tensor::CastOp and can be folded then fail.
     bool hasTensorCastOperand =
         llvm::any_of(op.getInputAndOutputOperands(), [&](OpOperand *opOperand) {
-          if (opOperand->get().isa<BlockArgument>())
+          if (isa<BlockArgument>(opOperand->get()))
             return false;
           auto castOp = opOperand->get().getDefiningOp<tensor::CastOp>();
           return castOp && canFoldIntoConsumerOp(castOp);

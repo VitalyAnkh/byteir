@@ -5,6 +5,7 @@
 
 module attributes {byre.container_module} {
   func.func @test_compute(%arg0: memref<100x?xf32> {byre.argtype = 1: i32, byre.argname = "A"}, %arg1: memref<100x?xf32> {byre.argtype = 2: i32, byre.argname = "B", byre.arg_alias_index = 0 : i64}) attributes {byre.entry_point, byteir.entry_point, tf.original_input_names} {
+    %alloc = memref.alloc() : memref<4xf32>
     byre.compute @some_kernel(%arg0, %arg1) : memref<100x?xf32>, memref<100x?xf32>
     return
   }
@@ -21,6 +22,7 @@ module attributes {byre.container_module} {
 //  CHECK-DAG:  byteir.entry_point
 //  CHECK-DAG:  tf.original_input_names
 // CHECK-SAME: }
+// CHECK:   memref.alloc() : memref<4xf32>
 // CHECK:   byre.compute @some_kernel(%arg0, %arg1) : memref<100x?xf32>, memref<100x?xf32>
 // CHECK:   return
 // CHECK: }
